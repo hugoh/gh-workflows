@@ -1,0 +1,10 @@
+[tools]
+hk = "latest"
+actionlint = "latest"
+pinact = "latest"
+zizmor = "latest"
+ghalint = "latest"
+gitleaks = "latest"
+dprint = "latest"
+typos = "latest"
+rumdl = "latest"
