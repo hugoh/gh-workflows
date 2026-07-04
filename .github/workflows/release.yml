@@ -25,7 +25,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create a GitHub release
-        if: steps.tag_version.outputs.changed == 'true'
+        if: steps.tag_version.outputs.new_tag != ''
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NEW_TAG: ${{ steps.tag_version.outputs.new_tag }}
