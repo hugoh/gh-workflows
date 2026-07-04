@@ -5,7 +5,7 @@ runs:
   steps:
     - name: hk checks
       shell: bash
-      run: hk check --no-progress --profile ci --all
+      run: hk check --no-progress --profile ci --all --no-fail-fast
     - name: Display hk log on failure
       if: failure()
       shell: bash
