@@ -36,6 +36,6 @@ jobs:
           CHANGELOG: ${{ steps.tag_version.outputs.changelog }}
         run: |
           gh release create "$NEW_TAG" \
-						--verify-tag \
+            --verify-tag \
             --title "Release $NEW_TAG" \
             --notes "$CHANGELOG"
