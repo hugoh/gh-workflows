@@ -8,6 +8,10 @@ on: # yamllint disable-line rule:truthy
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     timeout-minutes: 5
@@ -32,5 +36,6 @@ jobs:
           CHANGELOG: ${{ steps.tag_version.outputs.changelog }}
         run: |
           gh release create "$NEW_TAG" \
+            --verify-tag \
             --title "Release $NEW_TAG" \
             --notes "$CHANGELOG"
