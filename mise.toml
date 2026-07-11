@@ -1,5 +1,5 @@
 [tools]
-hk = "latest"
+hk = "1.50.0"
 actionlint = "latest"
 pinact = "latest"
 zizmor = "latest"
