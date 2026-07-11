@@ -43,3 +43,29 @@ exact same steps. The remaining repos aren't uniform — a couple need an extra
 step interleaved between mise setup and the `hk check` — so this repo splits
 the same logic into two composable actions instead, which callers can wrap
 their own steps around.
+
+## `repo-admin/` scripts
+
+Bulk-apply account-wide repo settings across all of hugoh's non-archived
+repos, using `gh` + `jq`. Forks are excluded by default — except those
+listed in `include-forks.txt` (currently just `Withings2Garmin`, a fork
+hugoh actually maintains); edit that file to add more, or override per-run
+with `GH_INCLUDE_FORKS` (comma-separated). Each script supports
+`--only name1,name2` / `--skip name1,name2` to scope to a subset; `GH_OWNER`
+overrides the default owner.
+
+- **`list-repos.sh`** — lists repos as a table: name, default branch,
+  private, fork
+- **`set-merge-settings.sh [--dry-run]`** — enables auto-merge and
+  delete-branch-on-merge
+- **`set-branch-protection.sh [--dry-run]`** — requires status checks to pass
+  and a PR (0 approvals needed, no direct pushes) before merging, matching
+  the convention `go-tools`' `mise run gh-repo-setup` already established.
+  Required contexts are detected from the most recent pull request's check
+  runs (not the default branch tip — see the script's header comment for
+  why). `--dry-run` diffs each repo's current protection against the
+  baseline and prints "up to date" or "would update", rather than just
+  showing what would be required. Private repos on a plan without
+  branch-protection access are reported, not failed.
+
+Run with `--dry-run` first and review the output before applying.

@@ -1,0 +1,4 @@
+# Forked repos that hugoh actually maintains and wants managed like any
+# other repo (auto-merge, branch protection, etc). One name per line.
+# Blank lines and lines starting with # are ignored.
+Withings2Garmin

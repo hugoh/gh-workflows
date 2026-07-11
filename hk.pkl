@@ -4,6 +4,12 @@ import "package://github.com/hugoh/hk-config/releases/download/v0.1.0/hk-config@
 
 local linters = new Mapping<String, Step> {
     ...Base.base
+    ["shellcheck"] = (Builtins.shellcheck) {
+        // hk invokes shellcheck per-file, so `-x` is needed for `source`d
+        // sibling scripts (e.g. repo-admin/lib.sh) to resolve.
+        check = "shellcheck -x {{ files }}"
+    }
+    ["shellharden"] = Builtins.shellharden
 }
 
 hooks {
