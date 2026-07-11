@@ -56,8 +56,11 @@ overrides the default owner.
 
 - **`list-repos.sh`** — lists repos as a table: name, default branch,
   private, fork
-- **`set-merge-settings.sh [--dry-run]`** — enables auto-merge and
-  delete-branch-on-merge
+- **`set-merge-settings.sh [--dry-run]`** — enables auto-merge,
+  delete-branch-on-merge, and PR-branch auto-update (the last one matters
+  because branch protection requires PR branches to be up to date before
+  merging; without auto-update, auto-merge PRs stall needing a manual
+  "Update branch" click)
 - **`set-branch-protection.sh [--dry-run]`** — requires status checks to pass
   and a PR (0 approvals needed, no direct pushes) before merging, matching
   the convention `go-tools`' `mise run gh-repo-setup` already established.
@@ -67,5 +70,11 @@ overrides the default owner.
   baseline and prints "up to date" or "would update", rather than just
   showing what would be required. Private repos on a plan without
   branch-protection access are reported, not failed.
+- **`set-security-features.sh [--dry-run]`** — enables Dependabot
+  vulnerability alerts (all repos, free), plus secret scanning, secret
+  scanning push protection, Dependabot security updates, and private
+  vulnerability reporting (public repos only — private repos need GitHub
+  Advanced Security, a paid add-on this account's plan doesn't include; such
+  repos are reported as unavailable, not failed).
 
 Run with `--dry-run` first and review the output before applying.
