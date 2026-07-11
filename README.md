@@ -48,8 +48,7 @@ their own steps around.
 
 Bulk-apply account-wide repo settings across all of hugoh's non-archived
 repos, using `gh` + `jq`. Forks are excluded by default — except those
-listed in `include-forks.txt` (currently just `Withings2Garmin`, a fork
-hugoh actually maintains); edit that file to add more, or override per-run
+listed in `include-forks.txt`; edit that file to add more, or override per-run
 with `GH_INCLUDE_FORKS` (comma-separated). Each script supports
 `--only name1,name2` / `--skip name1,name2` to scope to a subset; `GH_OWNER`
 overrides the default owner.
