@@ -1,17 +1,17 @@
 amends "package://github.com/jdx/hk/releases/download/v1.50.0/hk@1.50.0#/Config.pkl"
 import "package://github.com/jdx/hk/releases/download/v1.50.0/hk@1.50.0#/Builtins.pkl"
-import "package://github.com/hugoh/hk-config/releases/download/v0.2.0/hk-config@0.2.0#/base.pkl" as Base
+import "package://github.com/hugoh/hk-config/releases/download/v0.3.0/hk-config@0.3.0#/base.pkl" as Base
 
 min_hk_version = Base.min_hk_version
 
 local linters = new Mapping<String, Step> {
     ...Base.base
+    ...Base.shell
     ["shellcheck"] = (Builtins.shellcheck) {
         // hk invokes shellcheck per-file, so `-x` is needed for `source`d
         // sibling scripts (e.g. repo-admin/lib.sh) to resolve.
         check = "shellcheck -x {{ files }}"
     }
-    ["shellharden"] = Builtins.shellharden
 }
 
 hooks {
