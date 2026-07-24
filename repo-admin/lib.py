@@ -4,39 +4,109 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
-import json
 import os
 import subprocess
 import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+import requests
 
 LIB_DIR = Path(__file__).resolve().parent
+API_BASE = "https://api.github.com"
 DEFAULT_OWNER = os.environ.get("GH_OWNER", "hugoh")
 DEFAULT_JOBS = int(os.environ.get("GH_JOBS", "6"))
 
 
 class GhError(RuntimeError):
-    """A `gh` invocation -- or a repo's worker function -- failed unexpectedly."""
+    """A GitHub API call -- or a repo's worker function -- failed unexpectedly.
+
+    status_code is set for HTTP errors raised by api_json(), so callers can
+    branch on the real status code (e.g. 403 vs 404) instead of
+    string-matching an error message.
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
-def run_gh(*args: str, input: str | None = None) -> str:
-    """Runs `gh <args>`, returning stdout. Raises GhError (with stderr as the
-    message) on a nonzero exit -- callers that expect a particular failure
-    (e.g. a 404 for a plan-gated feature) should catch GhError and inspect
-    its message rather than pre-checking.
+def _auth_token() -> str:
+    """Reads the token `gh` already has -- keychain storage, SSO, and 2FA are
+    already solved by `gh auth login`, so this reuses that instead of
+    managing a separate credential.
     """
     result = subprocess.run(
-        ["gh", *args],
-        input=input,
-        capture_output=True,
-        text=True,
-        check=False,
+        ["gh", "auth", "token"], capture_output=True, text=True, check=False
     )
     if result.returncode != 0:
-        raise GhError(result.stderr.strip())
-    return result.stdout
+        raise GhError(f"gh auth token failed: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+_local = threading.local()
+
+
+def _session() -> requests.Session:
+    # Thread-local rather than one shared Session: requests.Session doesn't
+    # document thread-safety guarantees, and run_parallel calls into this
+    # from a thread pool. Each worker thread pays the `gh auth token`
+    # subprocess cost once, then reuses its own session for every repo it
+    # handles.
+    session = getattr(_local, "session", None)
+    if session is None:
+        session = requests.Session()
+        session.headers.update(
+            {
+                "Authorization": f"Bearer {_auth_token()}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+        )
+        _local.session = session
+    return session
+
+
+def api_request(
+    method: str, path: str, *, json: Any = None, params: dict | None = None
+) -> requests.Response:
+    """Makes one GitHub REST API call and returns the raw Response --
+    callers decide what a given status means for their endpoint (e.g. a 404
+    means "feature disabled" for vulnerability-alerts but "not found"
+    everywhere else). Raises GhError only for genuine transport failures
+    (DNS, timeout, connection reset); HTTP error statuses are returned, not
+    raised.
+    """
+    url = path if path.startswith("http") else f"{API_BASE}{path}"
+    try:
+        return _session().request(method, url, json=json, params=params, timeout=30)
+    except requests.RequestException as exc:
+        raise GhError(str(exc)) from exc
+
+
+def error_message(response: requests.Response) -> str:
+    """Extracts GitHub's own `message` field from an error response body,
+    falling back to the raw response text if the body isn't JSON.
+    """
+    try:
+        return response.json().get("message", response.text)
+    except ValueError:
+        return response.text
+
+
+def api_json(
+    method: str, path: str, *, json: Any = None, params: dict | None = None
+) -> dict:
+    """Like api_request, but raises GhError (with status_code and GitHub's
+    own error message) on any non-2xx response, and returns the parsed JSON
+    body -- or {} for a body-less response like 204 No Content -- on success.
+    """
+    response = api_request(method, path, json=json, params=params)
+    if not response.ok:
+        raise GhError(error_message(response), status_code=response.status_code)
+    return response.json() if response.content else {}
 
 
 @dataclass(frozen=True)
@@ -54,17 +124,31 @@ class RepoResult:
     tag: str | None = None
 
 
+def _paginated(method: str, path: str, *, params: dict | None = None) -> list[dict]:
+    items = []
+    url = path
+    query = params
+    while url:
+        response = api_request(method, url, params=query)
+        if not response.ok:
+            raise GhError(error_message(response), status_code=response.status_code)
+        items.extend(response.json())
+        url = response.links.get("next", {}).get("url")
+        query = None  # the "next" link already carries the full query string
+    return items
+
+
 def fetch_repos_json(owner: str) -> list[dict]:
-    out = run_gh(
-        "repo",
-        "list",
-        owner,
-        "--limit",
-        "300",
-        "--json",
-        "name,isFork,isArchived,isPrivate,defaultBranchRef",
-    )
-    return json.loads(out)
+    """Lists every repo for `owner`. When `owner` is the authenticated `gh`
+    user, uses /user/repos so private repos are included; otherwise falls
+    back to /users/{owner}/repos, which only ever returns public repos.
+    """
+    viewer = api_json("GET", "/user").get("login")
+    if owner == viewer:
+        return _paginated(
+            "GET", "/user/repos", params={"affiliation": "owner", "per_page": "100"}
+        )
+    return _paginated("GET", f"/users/{owner}/repos", params={"per_page": "100"})
 
 
 def default_include_forks() -> set[str]:
@@ -98,22 +182,21 @@ def filter_repos(
     include_forks = include_forks or set()
     repos = []
     for entry in repos_json:
-        if entry["isArchived"]:
+        if entry["archived"]:
             continue
         name = entry["name"]
-        if entry["isFork"] and name not in include_forks:
+        if entry["fork"] and name not in include_forks:
             continue
         if only and name not in only:
             continue
         if skip and name in skip:
             continue
-        default_branch_ref = entry.get("defaultBranchRef") or {}
         repos.append(
             Repo(
                 name=name,
-                default_branch=default_branch_ref.get("name", ""),
-                is_private=entry["isPrivate"],
-                is_fork=entry["isFork"],
+                default_branch=entry.get("default_branch") or "",
+                is_private=entry["private"],
+                is_fork=entry["fork"],
             )
         )
     return repos

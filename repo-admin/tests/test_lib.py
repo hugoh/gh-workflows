@@ -2,44 +2,56 @@ import threading
 import time
 
 import pytest
+import responses
 
-from lib import GhError, Repo, RepoResult, filter_repos, run_parallel
+from lib import (
+    API_BASE,
+    GhError,
+    Repo,
+    RepoResult,
+    api_json,
+    api_request,
+    error_message,
+    fetch_repos_json,
+    filter_repos,
+    run_parallel,
+)
 
 REPOS_JSON = [
     {
         "name": "public-repo",
-        "isFork": False,
-        "isArchived": False,
-        "isPrivate": False,
-        "defaultBranchRef": {"name": "main"},
+        "fork": False,
+        "archived": False,
+        "private": False,
+        "default_branch": "main",
     },
     {
         "name": "archived-repo",
-        "isFork": False,
-        "isArchived": True,
-        "isPrivate": False,
-        "defaultBranchRef": {"name": "main"},
+        "fork": False,
+        "archived": True,
+        "private": False,
+        "default_branch": "main",
     },
     {
         "name": "fork-repo",
-        "isFork": True,
-        "isArchived": False,
-        "isPrivate": False,
-        "defaultBranchRef": {"name": "main"},
+        "fork": True,
+        "archived": False,
+        "private": False,
+        "default_branch": "main",
     },
     {
         "name": "maintained-fork",
-        "isFork": True,
-        "isArchived": False,
-        "isPrivate": True,
-        "defaultBranchRef": {"name": "master"},
+        "fork": True,
+        "archived": False,
+        "private": True,
+        "default_branch": "master",
     },
     {
         "name": "empty-repo",
-        "isFork": False,
-        "isArchived": False,
-        "isPrivate": False,
-        "defaultBranchRef": None,
+        "fork": False,
+        "archived": False,
+        "private": False,
+        "default_branch": None,
     },
 ]
 
@@ -79,7 +91,7 @@ def test_filter_repos_fields():
     ]
 
 
-def test_filter_repos_handles_null_default_branch_ref():
+def test_filter_repos_handles_null_default_branch():
     repos = filter_repos(REPOS_JSON, only={"empty-repo"})
     assert repos[0].default_branch == ""
 
@@ -156,3 +168,132 @@ def test_run_parallel_reports_failed_repo_names_in_error(capsys):
     with pytest.raises(GhError, match="bad-repo"):
         run_parallel(repos, worker, jobs=1)
     assert "bad-repo" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# HTTP layer
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def fake_auth_token(monkeypatch):
+    # Avoids every test in this module shelling out to the real `gh auth
+    # token` -- session creation is lazy and thread-local, so this just
+    # needs to be in place before the first api_request/api_json call.
+    monkeypatch.setattr("lib._auth_token", lambda: "fake-token")
+
+
+@responses.activate
+def test_error_message_prefers_json_message_field():
+    responses.add(
+        responses.GET, f"{API_BASE}/x", json={"message": "not found"}, status=404
+    )
+    response = api_request("GET", "/x")
+    assert error_message(response) == "not found"
+
+
+@responses.activate
+def test_error_message_falls_back_to_raw_text_for_non_json_body():
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/x",
+        body="plain text error",
+        status=500,
+        content_type="text/plain",
+    )
+    response = api_request("GET", "/x")
+    assert error_message(response) == "plain text error"
+
+
+@responses.activate
+def test_api_json_returns_parsed_body_on_success():
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/repos/hugoh/gh-workflows",
+        json={"name": "gh-workflows"},
+        status=200,
+    )
+    assert api_json("GET", "/repos/hugoh/gh-workflows") == {"name": "gh-workflows"}
+
+
+@responses.activate
+def test_api_json_raises_gh_error_with_status_code_on_failure():
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/repos/hugoh/nope",
+        json={"message": "Not Found"},
+        status=404,
+    )
+    with pytest.raises(GhError) as exc_info:
+        api_json("GET", "/repos/hugoh/nope")
+    assert exc_info.value.status_code == 404
+    assert "Not Found" in str(exc_info.value)
+
+
+@responses.activate
+def test_api_json_handles_empty_204_response():
+    responses.add(
+        responses.PUT,
+        f"{API_BASE}/repos/hugoh/gh-workflows/vulnerability-alerts",
+        status=204,
+    )
+    assert api_json("PUT", "/repos/hugoh/gh-workflows/vulnerability-alerts") == {}
+
+
+@responses.activate
+def test_api_request_does_not_raise_on_http_error_status():
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/repos/hugoh/private-repo/private-vulnerability-reporting",
+        status=404,
+    )
+    response = api_request(
+        "GET", "/repos/hugoh/private-repo/private-vulnerability-reporting"
+    )
+    assert response.status_code == 404
+
+
+@responses.activate
+def test_fetch_repos_json_uses_authenticated_user_repos_when_owner_matches():
+    responses.add(
+        responses.GET, f"{API_BASE}/user", json={"login": "hugoh"}, status=200
+    )
+    responses.add(
+        responses.GET, f"{API_BASE}/user/repos", json=[{"name": "a"}], status=200
+    )
+    assert fetch_repos_json("hugoh") == [{"name": "a"}]
+
+
+@responses.activate
+def test_fetch_repos_json_falls_back_to_public_repos_for_other_owners():
+    responses.add(
+        responses.GET, f"{API_BASE}/user", json={"login": "hugoh"}, status=200
+    )
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/users/someorg/repos",
+        json=[{"name": "b"}],
+        status=200,
+    )
+    assert fetch_repos_json("someorg") == [{"name": "b"}]
+
+
+@responses.activate
+def test_fetch_repos_json_follows_pagination_link_header():
+    responses.add(
+        responses.GET, f"{API_BASE}/user", json={"login": "hugoh"}, status=200
+    )
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/user/repos",
+        json=[{"name": "page1"}],
+        status=200,
+        headers={"Link": f'<{API_BASE}/user/repos?page=2>; rel="next"'},
+    )
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/user/repos?page=2",
+        json=[{"name": "page2"}],
+        status=200,
+    )
+    assert fetch_repos_json("hugoh") == [{"name": "page1"}, {"name": "page2"}]

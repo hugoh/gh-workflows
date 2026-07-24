@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Bulk-applies account-wide GitHub repo settings across hugoh's non-archived
-repos, via `gh`.
+repos, via the GitHub REST API (authenticated through `gh auth token`).
 
 Usage: repo_admin.py <command> [--dry-run] [--only name1,name2] [--skip name1,name2]
 
@@ -22,7 +22,6 @@ first and review the output.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 
 from lib import (
@@ -30,9 +29,11 @@ from lib import (
     GhError,
     Repo,
     RepoResult,
+    api_json,
+    api_request,
     as_set,
+    error_message,
     list_repos,
-    run_gh,
     run_parallel,
 )
 
@@ -72,7 +73,7 @@ MERGE_SETTINGS_FIELDS = [
 
 
 def _merge_settings(owner: str, name: str) -> dict:
-    data = json.loads(run_gh("api", f"repos/{owner}/{name}"))
+    data = api_json("GET", f"/repos/{owner}/{name}")
     return {field: data[field] for field in MERGE_SETTINGS_FIELDS}
 
 
@@ -96,13 +97,10 @@ def make_merge_settings_worker(owner: str, dry_run: bool):
             return RepoResult(repo, merge_settings_dry_run_line(repo.name, current))
 
         before = _merge_settings(owner, repo.name)
-        run_gh(
-            "repo",
-            "edit",
-            f"{owner}/{repo.name}",
-            "--enable-auto-merge",
-            "--delete-branch-on-merge",
-            "--allow-update-branch",
+        api_json(
+            "PATCH",
+            f"/repos/{owner}/{repo.name}",
+            json={field: True for field in MERGE_SETTINGS_FIELDS},
         )
         after = _merge_settings(owner, repo.name)
         return RepoResult(repo, merge_settings_apply_line(repo.name, before, after))
@@ -180,18 +178,25 @@ def security_dry_run_line(name: str, summary: dict) -> str:
 
 
 def _fetch_security_state(owner: str, name: str) -> tuple[dict, bool, dict | None]:
-    repo_json = json.loads(run_gh("api", f"repos/{owner}/{name}"))
-    try:
-        run_gh("api", f"repos/{owner}/{name}/vulnerability-alerts")
-        vuln_alerts_enabled = True
-    except GhError:
-        vuln_alerts_enabled = False
-    try:
-        pvr_json = json.loads(
-            run_gh("api", f"repos/{owner}/{name}/private-vulnerability-reporting")
+    repo_json = api_json("GET", f"/repos/{owner}/{name}")
+
+    # 204 = enabled, 404 = disabled -- GitHub's documented shape for this
+    # endpoint, not an error either way.
+    vuln_response = api_request("GET", f"/repos/{owner}/{name}/vulnerability-alerts")
+    if vuln_response.status_code not in (204, 404):
+        raise GhError(
+            error_message(vuln_response), status_code=vuln_response.status_code
         )
-    except GhError:
-        pvr_json = None
+    vuln_alerts_enabled = vuln_response.status_code == 204
+
+    # 200 = available (body has "enabled"), 404 = not available on this plan.
+    pvr_response = api_request(
+        "GET", f"/repos/{owner}/{name}/private-vulnerability-reporting"
+    )
+    if pvr_response.status_code not in (200, 404):
+        raise GhError(error_message(pvr_response), status_code=pvr_response.status_code)
+    pvr_json = pvr_response.json() if pvr_response.status_code == 200 else None
+
     return repo_json, vuln_alerts_enabled, pvr_json
 
 
@@ -207,38 +212,41 @@ def make_security_features_worker(owner: str, dry_run: bool):
             )
             return RepoResult(repo, security_dry_run_line(repo.name, summary))
 
-        run_gh("api", "-X", "PUT", f"repos/{owner}/{repo.name}/vulnerability-alerts")
+        api_json("PUT", f"/repos/{owner}/{repo.name}/vulnerability-alerts")
 
         unavailable = []
-        try:
-            run_gh(
-                "api",
-                "-X",
-                "PATCH",
-                f"repos/{owner}/{repo.name}",
-                "-f",
-                "security_and_analysis[secret_scanning][status]=enabled",
-                "-f",
-                "security_and_analysis[secret_scanning_push_protection][status]=enabled",
-                "-f",
-                "security_and_analysis[dependabot_security_updates][status]=enabled",
-            )
-        except GhError as exc:
-            if "not available for this repository" not in str(exc):
-                raise
-            unavailable.append("secret scanning")
 
-        try:
-            run_gh(
-                "api",
-                "-X",
-                "PUT",
-                f"repos/{owner}/{repo.name}/private-vulnerability-reporting",
+        # 422 = one or more of these fields isn't available on this plan
+        # (GitHub Advanced Security is required for private repos).
+        security_response = api_request(
+            "PATCH",
+            f"/repos/{owner}/{repo.name}",
+            json={
+                "security_and_analysis": {
+                    "secret_scanning": {"status": "enabled"},
+                    "secret_scanning_push_protection": {"status": "enabled"},
+                    "dependabot_security_updates": {"status": "enabled"},
+                }
+            },
+        )
+        if security_response.status_code == 422:
+            unavailable.append("secret scanning")
+        elif not security_response.ok:
+            raise GhError(
+                error_message(security_response),
+                status_code=security_response.status_code,
             )
-        except GhError as exc:
-            if "Not Found" not in str(exc):
-                raise
+
+        # 404 = not available on this plan.
+        pvr_response = api_request(
+            "PUT", f"/repos/{owner}/{repo.name}/private-vulnerability-reporting"
+        )
+        if pvr_response.status_code == 404:
             unavailable.append("private vulnerability reporting")
+        elif not pvr_response.ok:
+            raise GhError(
+                error_message(pvr_response), status_code=pvr_response.status_code
+            )
 
         if not unavailable:
             return RepoResult(repo, f"{repo.name:<30} enabled")
@@ -323,27 +331,22 @@ def branch_protection_up_to_date(current: dict | None, contexts: list[str]) -> b
 
 
 def _latest_pr_head_sha(owner: str, name: str) -> str | None:
-    out = run_gh(
-        "api",
-        "-X",
+    pulls = api_json(
         "GET",
-        f"repos/{owner}/{name}/pulls",
-        "-f",
-        "state=all",
-        "-f",
-        "per_page=1",
-        "-f",
-        "sort=updated",
-        "-f",
-        "direction=desc",
+        f"/repos/{owner}/{name}/pulls",
+        params={
+            "state": "all",
+            "per_page": "1",
+            "sort": "updated",
+            "direction": "desc",
+        },
     )
-    pulls = json.loads(out)
     return pulls[0]["head"]["sha"] if pulls else None
 
 
 def _check_run_contexts(owner: str, name: str, sha: str) -> list[str]:
-    out = run_gh("api", f"repos/{owner}/{name}/commits/{sha}/check-runs")
-    return sorted({run["name"] for run in json.loads(out)["check_runs"]})
+    data = api_json("GET", f"/repos/{owner}/{name}/commits/{sha}/check-runs")
+    return sorted({run["name"] for run in data["check_runs"]})
 
 
 def make_branch_protection_worker(owner: str, dry_run: bool):
@@ -365,23 +368,24 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
             )
 
         if dry_run:
-            try:
-                current = json.loads(
-                    run_gh(
-                        "api",
-                        f"repos/{owner}/{repo.name}/branches/{repo.default_branch}/protection",
-                    )
+            protection_response = api_request(
+                "GET",
+                f"/repos/{owner}/{repo.name}/branches/{repo.default_branch}/protection",
+            )
+            if protection_response.status_code == 403:
+                return RepoResult(
+                    repo,
+                    f"{repo.name:<30} cannot check: private repo, plan does not allow branch protection",
                 )
-            except GhError as exc:
-                if "Upgrade to GitHub Pro" in str(exc):
-                    return RepoResult(
-                        repo,
-                        f"{repo.name:<30} cannot check: private repo, plan does not allow branch protection",
-                    )
-                if "Branch not protected" in str(exc):
-                    current = None
-                else:
-                    raise
+            if protection_response.status_code == 404:
+                current = None
+            elif protection_response.ok:
+                current = protection_response.json()
+            else:
+                raise GhError(
+                    error_message(protection_response),
+                    status_code=protection_response.status_code,
+                )
 
             if branch_protection_up_to_date(current, contexts):
                 return RepoResult(
@@ -392,23 +396,20 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
             )
 
         payload = branch_protection_payload(contexts)
-        try:
-            run_gh(
-                "api",
-                "-X",
-                "PUT",
-                f"repos/{owner}/{repo.name}/branches/{repo.default_branch}/protection",
-                "--input",
-                "-",
-                input=json.dumps(payload),
-            )
-        except GhError as exc:
-            if "Upgrade to GitHub Pro" not in str(exc):
-                raise
+        put_response = api_request(
+            "PUT",
+            f"/repos/{owner}/{repo.name}/branches/{repo.default_branch}/protection",
+            json=payload,
+        )
+        if put_response.status_code == 403:
             return RepoResult(
                 repo,
                 f"{repo.name:<30} skipped: private repo, plan does not allow branch protection",
                 tag="skipped_no_plan",
+            )
+        if not put_response.ok:
+            raise GhError(
+                error_message(put_response), status_code=put_response.status_code
             )
 
         return RepoResult(

@@ -47,15 +47,17 @@ their own steps around.
 ## `repo-admin/` — bulk repo settings
 
 Bulk-applies account-wide repo settings across all of hugoh's non-archived
-repos, via `gh`. A single Python CLI (`repo_admin.py`, run through `uv`) with
-one subcommand per operation; repos are processed in parallel (`GH_JOBS`,
-default 6). Forks are excluded by default — except those listed in
+repos, via the GitHub REST API (authenticated through `gh auth token`, so it
+reuses `gh`'s existing login rather than managing a separate credential). A
+single Python CLI (`repo_admin.py`, run through `uv`) with one subcommand per
+operation; repos are processed in parallel (`GH_JOBS`, default 6). Forks are
+excluded by default — except those listed in
 `include-forks.txt`; edit that file to add more, or override per-run with
 `GH_INCLUDE_FORKS` (comma-separated). Every subcommand supports
 `--only name1,name2` / `--skip name1,name2` to scope to a subset; `GH_OWNER`
 overrides the default owner.
 
-```
+```text
 cd repo-admin
 uv run repo_admin.py <command> [--dry-run] [--only name1,name2] [--skip name1,name2]
 ```
