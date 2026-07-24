@@ -31,16 +31,18 @@ class Status(enum.Enum):
     end-of-run summaries.
     """
 
-    OK = "ok"  # applied a change, or would (dry-run)
-    UNCHANGED = "unchanged"  # already in the desired state, nothing to do
-    SKIPPED = "skipped"  # not applicable to this repo (plan gating, etc.)
+    OK = "ok"  # full target reached, changed this run
+    UNCHANGED = "unchanged"  # full target reached, already was
+    LIMITED = "limited"  # best-effort (capped by plan/data) reached, changed this run
+    LIMITED_UNCHANGED = "limited_unchanged"  # best-effort reached, already was
     FAILED = "failed"  # worker raised
 
 
 _STATUS_DISPLAY: dict[Status, tuple[str, str]] = {
     Status.OK: ("✓", "green"),
-    Status.UNCHANGED: ("•", "cyan"),
-    Status.SKIPPED: ("○", "yellow"),
+    Status.UNCHANGED: ("•", "green"),
+    Status.LIMITED: ("○", "yellow"),
+    Status.LIMITED_UNCHANGED: ("•", "yellow"),
     Status.FAILED: ("✗", "red"),
 }
 

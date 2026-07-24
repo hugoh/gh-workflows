@@ -1,6 +1,7 @@
 import threading
 import time
 
+import lib
 import pytest
 import responses
 from lib import (
@@ -124,13 +125,12 @@ def test_print_status_prints_line_to_stdout(capsys):
     assert "repo-a done" in capsys.readouterr().out
 
 
-def test_print_status_prints_distinct_symbols_per_status(capsys):
-    for status in Status:
-        print_status(status, "x")
-    out = capsys.readouterr().out
-    lines = [line for line in out.splitlines() if line]
-    symbols = {line.split()[0] for line in lines}
-    assert len(symbols) == len(list(Status))
+def test_status_display_pairs_are_unique_per_status():
+    # (symbol, color) pairs -- not symbols alone, since e.g. UNCHANGED and
+    # LIMITED_UNCHANGED intentionally share the "•" symbol and differ only
+    # by color.
+    pairs = list(lib._STATUS_DISPLAY.values())
+    assert len(pairs) == len(set(pairs)) == len(list(Status))
 
 
 def test_print_status_does_not_interpret_brackets_in_line_as_markup(capsys):

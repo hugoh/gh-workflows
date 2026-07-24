@@ -78,6 +78,10 @@ def _merge_settings(owner: str, name: str) -> dict:
     return {field: data[field] for field in MERGE_SETTINGS_FIELDS}
 
 
+def merge_settings_at_target(settings: dict) -> bool:
+    return all(settings[field] for field in MERGE_SETTINGS_FIELDS)
+
+
 def merge_settings_dry_run_line(name: str, current: dict) -> str:
     would_enable = [field for field in MERGE_SETTINGS_FIELDS if not current[field]]
     if not would_enable:
@@ -96,9 +100,7 @@ def make_merge_settings_worker(owner: str, dry_run: bool):
         if dry_run:
             current = _merge_settings(owner, repo.name)
             status = (
-                Status.UNCHANGED
-                if all(current[field] for field in MERGE_SETTINGS_FIELDS)
-                else Status.OK
+                Status.UNCHANGED if merge_settings_at_target(current) else Status.OK
             )
             return RepoResult(
                 repo, merge_settings_dry_run_line(repo.name, current), status
@@ -111,7 +113,11 @@ def make_merge_settings_worker(owner: str, dry_run: bool):
             json={field: True for field in MERGE_SETTINGS_FIELDS},
         )
         after = _merge_settings(owner, repo.name)
-        status = Status.UNCHANGED if before == after else Status.OK
+        unchanged = before == after
+        if merge_settings_at_target(after):
+            status = Status.UNCHANGED if unchanged else Status.OK
+        else:
+            status = Status.LIMITED_UNCHANGED if unchanged else Status.LIMITED
         return RepoResult(
             repo, merge_settings_apply_line(repo.name, before, after), status
         )
@@ -211,18 +217,28 @@ def _fetch_security_state(owner: str, name: str) -> tuple[dict, bool, dict | Non
     return repo_json, vuln_alerts_enabled, pvr_json
 
 
+def security_status(unavailable: list, changed: bool) -> Status:
+    if unavailable:
+        return Status.LIMITED if changed else Status.LIMITED_UNCHANGED
+    return Status.OK if changed else Status.UNCHANGED
+
+
 def make_security_features_worker(owner: str, dry_run: bool):
     def worker(repo: Repo) -> RepoResult:
         repo_json, vuln_alerts_enabled, pvr_json = _fetch_security_state(
             owner, repo.name
         )
+        before_summary = security_summarize(
+            repo_json, vuln_alerts_enabled=vuln_alerts_enabled, pvr_json=pvr_json
+        )
 
         if dry_run:
-            summary = security_summarize(
-                repo_json, vuln_alerts_enabled=vuln_alerts_enabled, pvr_json=pvr_json
+            status = security_status(
+                before_summary["unavailable"], bool(before_summary["would_enable"])
             )
-            status = Status.UNCHANGED if not summary["would_enable"] else Status.OK
-            return RepoResult(repo, security_dry_run_line(repo.name, summary), status)
+            return RepoResult(
+                repo, security_dry_run_line(repo.name, before_summary), status
+            )
 
         api_json("PUT", f"/repos/{owner}/{repo.name}/vulnerability-alerts")
 
@@ -260,11 +276,13 @@ def make_security_features_worker(owner: str, dry_run: bool):
                 error_message(pvr_response), status_code=pvr_response.status_code
             )
 
+        status = security_status(unavailable, bool(before_summary["would_enable"]))
         if not unavailable:
-            return RepoResult(repo, f"{repo.name:<30} enabled")
+            return RepoResult(repo, f"{repo.name:<30} enabled", status)
         return RepoResult(
             repo,
             f"{repo.name:<30} enabled (unavailable: {', '.join(unavailable)})",
+            status,
             tag="unavailable",
         )
 
@@ -368,7 +386,7 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
             return RepoResult(
                 repo,
                 f"{repo.name:<30} no pull requests found, skipping (nothing to detect PR-gating checks from)",
-                Status.SKIPPED,
+                Status.LIMITED_UNCHANGED,
                 tag="skipped_no_checks",
             )
 
@@ -377,7 +395,7 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
             return RepoResult(
                 repo,
                 f"{repo.name:<30} no check runs found on latest PR commit {pr_head_sha}, skipping",
-                Status.SKIPPED,
+                Status.LIMITED_UNCHANGED,
                 tag="skipped_no_checks",
             )
 
@@ -390,7 +408,7 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
                 return RepoResult(
                     repo,
                     f"{repo.name:<30} cannot check: private repo, plan does not allow branch protection",
-                    Status.SKIPPED,
+                    Status.LIMITED_UNCHANGED,
                 )
             if protection_response.status_code == 404:
                 current = None
@@ -424,7 +442,7 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
             return RepoResult(
                 repo,
                 f"{repo.name:<30} skipped: private repo, plan does not allow branch protection",
-                Status.SKIPPED,
+                Status.LIMITED_UNCHANGED,
                 tag="skipped_no_plan",
             )
         if not put_response.ok:
