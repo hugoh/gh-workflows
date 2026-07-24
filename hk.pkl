@@ -7,10 +7,19 @@ min_hk_version = Base.min_hk_version
 local linters = new Mapping<String, Step> {
     ...Base.base
     ...Base.shell
-    ["shellcheck"] = (Builtins.shellcheck) {
-        // hk invokes shellcheck per-file, so `-x` is needed for `source`d
-        // sibling scripts (e.g. repo-admin/lib.sh) to resolve.
-        check = "shellcheck -x {{ files }}"
+    ...Base.python
+    ["uv-sync"] = {
+        dir = "repo-admin"
+        check = "uv sync"
+    }
+    ["pytest"] = {
+        dir = "repo-admin"
+        check = "uv run pytest"
+        profiles = List("ci")
+        depends = List("uv-sync")
+    }
+    ["ty"] {
+        depends = List("uv-sync")
     }
 }
 

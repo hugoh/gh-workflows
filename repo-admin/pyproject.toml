@@ -1,0 +1,11 @@
+[project]
+name = "repo-admin"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["requests>=2.31", "rich>=13"]
+
+[dependency-groups]
+dev = ["pytest>=8", "responses>=0.25"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

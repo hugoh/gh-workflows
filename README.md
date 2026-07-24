@@ -44,36 +44,48 @@ step interleaved between mise setup and the `hk check` — so this repo splits
 the same logic into two composable actions instead, which callers can wrap
 their own steps around.
 
-## `repo-admin/` scripts
+## `repo-admin/` — bulk repo settings
 
-Bulk-apply account-wide repo settings across all of hugoh's non-archived
-repos, using `gh` + `jq`. Forks are excluded by default — except those
-listed in `include-forks.txt`; edit that file to add more, or override per-run
-with `GH_INCLUDE_FORKS` (comma-separated). Each script supports
+Bulk-applies account-wide repo settings across all of hugoh's non-archived
+repos, via the GitHub REST API (authenticated through `gh auth token`, so it
+reuses `gh`'s existing login rather than managing a separate credential). A
+single Python CLI (`repo_admin.py`, run through `uv`) with one subcommand per
+operation; repos are processed in parallel (`GH_JOBS`, default 6). Forks are
+excluded by default — except those listed in
+`include-forks.txt`; edit that file to add more, or override per-run with
+`GH_INCLUDE_FORKS` (comma-separated). Every subcommand supports
 `--only name1,name2` / `--skip name1,name2` to scope to a subset; `GH_OWNER`
 overrides the default owner.
 
-- **`list-repos.sh`** — lists repos as a table: name, default branch,
-  private, fork
-- **`set-merge-settings.sh [--dry-run]`** — enables auto-merge,
+```text
+cd repo-admin
+uv run repo_admin.py <command> [--dry-run] [--only name1,name2] [--skip name1,name2]
+```
+
+- **`list`** — lists repos as a table: name, default branch, private, fork
+- **`merge-settings [--dry-run]`** — enables auto-merge,
   delete-branch-on-merge, and PR-branch auto-update (the last one matters
   because branch protection requires PR branches to be up to date before
   merging; without auto-update, auto-merge PRs stall needing a manual
   "Update branch" click)
-- **`set-branch-protection.sh [--dry-run]`** — requires status checks to pass
-  and a PR (0 approvals needed, no direct pushes) before merging, matching
-  the convention `go-tools`' `mise run gh-repo-setup` already established.
+- **`branch-protection [--dry-run]`** — requires status checks to pass and a
+  PR (0 approvals needed, no direct pushes) before merging, matching the
+  convention `go-tools`' `mise run gh-repo-setup` already established.
   Required contexts are detected from the most recent pull request's check
-  runs (not the default branch tip — see the script's header comment for
-  why). `--dry-run` diffs each repo's current protection against the
-  baseline and prints "up to date" or "would update", rather than just
+  runs (not the default branch tip — see `repo_admin.py`'s header comment
+  for why). `--dry-run` diffs each repo's current protection against the
+  baseline and prints "unchanged: ..." or "would update", rather than just
   showing what would be required. Private repos on a plan without
   branch-protection access are reported, not failed.
-- **`set-security-features.sh [--dry-run]`** — enables Dependabot
-  vulnerability alerts (all repos, free), plus secret scanning, secret
-  scanning push protection, Dependabot security updates, and private
-  vulnerability reporting (public repos only — private repos need GitHub
-  Advanced Security, a paid add-on this account's plan doesn't include; such
-  repos are reported as unavailable, not failed).
+- **`security-features [--dry-run]`** — enables Dependabot vulnerability
+  alerts (all repos, free), plus secret scanning, secret scanning push
+  protection, Dependabot security updates, and private vulnerability
+  reporting (public repos only — private repos need GitHub Advanced
+  Security, a paid add-on this account's plan doesn't include; such repos
+  are reported as unavailable, not failed).
+- **`all [--dry-run]`** — runs `merge-settings`, `branch-protection`, then
+  `security-features` in sequence. One command failing doesn't stop the
+  others; the exit code is nonzero if any of them failed.
 
-Run with `--dry-run` first and review the output before applying.
+Run a mutating command with `--dry-run` first and review the output before
+applying. Tests: `cd repo-admin && uv run pytest`.
