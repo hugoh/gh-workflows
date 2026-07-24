@@ -83,6 +83,9 @@ uv run repo_admin.py <command> [--dry-run] [--only name1,name2] [--skip name1,na
   reporting (public repos only — private repos need GitHub Advanced
   Security, a paid add-on this account's plan doesn't include; such repos
   are reported as unavailable, not failed).
+- **`all [--dry-run]`** — runs `merge-settings`, `branch-protection`, then
+  `security-features` in sequence. One command failing doesn't stop the
+  others; the exit code is nonzero if any of them failed.
 
 Run a mutating command with `--dry-run` first and review the output before
 applying. Tests: `cd repo-admin && uv run pytest`.

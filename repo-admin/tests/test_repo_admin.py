@@ -1,5 +1,7 @@
+import argparse
+
 import repo_admin
-from lib import Repo, Status
+from lib import GhError, Repo, Status
 
 REPO = Repo(name="repo", default_branch="main", is_private=False, is_fork=False)
 
@@ -482,3 +484,69 @@ def test_branch_protection_worker_dry_run_unchanged_line(monkeypatch):
     result = worker(REPO)
     assert result.status == Status.UNCHANGED
     assert result.line == f"{'repo':<30} unchanged: build, test"
+
+
+# ---------------------------------------------------------------------------
+# all
+# ---------------------------------------------------------------------------
+
+
+def test_cmd_all_runs_merge_settings_branch_protection_security_in_order(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        repo_admin,
+        "cmd_merge_settings",
+        lambda args: calls.append("merge-settings") or 0,
+    )
+    monkeypatch.setattr(
+        repo_admin,
+        "cmd_branch_protection",
+        lambda args: calls.append("branch-protection") or 0,
+    )
+    monkeypatch.setattr(
+        repo_admin,
+        "cmd_security_features",
+        lambda args: calls.append("security-features") or 0,
+    )
+    args = argparse.Namespace(dry_run=True, only=None, skip=None)
+    assert repo_admin.cmd_all(args) == 0
+    assert calls == ["merge-settings", "branch-protection", "security-features"]
+
+
+def test_cmd_all_continues_after_a_command_fails_and_returns_nonzero(monkeypatch):
+    calls = []
+
+    def failing(args):
+        calls.append("merge-settings")
+        raise GhError("boom")
+
+    monkeypatch.setattr(repo_admin, "cmd_merge_settings", failing)
+    monkeypatch.setattr(
+        repo_admin,
+        "cmd_branch_protection",
+        lambda args: calls.append("branch-protection") or 0,
+    )
+    monkeypatch.setattr(
+        repo_admin,
+        "cmd_security_features",
+        lambda args: calls.append("security-features") or 0,
+    )
+    args = argparse.Namespace(dry_run=True, only=None, skip=None)
+    assert repo_admin.cmd_all(args) == 1
+    assert calls == ["merge-settings", "branch-protection", "security-features"]
+
+
+def test_cmd_all_returns_nonzero_when_a_command_returns_nonzero(monkeypatch):
+    monkeypatch.setattr(repo_admin, "cmd_merge_settings", lambda args: 1)
+    monkeypatch.setattr(repo_admin, "cmd_branch_protection", lambda args: 0)
+    monkeypatch.setattr(repo_admin, "cmd_security_features", lambda args: 0)
+    args = argparse.Namespace(dry_run=True, only=None, skip=None)
+    assert repo_admin.cmd_all(args) == 1
+
+
+def test_all_subcommand_is_registered_in_parser():
+    args = repo_admin.build_parser().parse_args(["all", "--dry-run"])
+    assert args.func == repo_admin.cmd_all
+    assert args.dry_run is True

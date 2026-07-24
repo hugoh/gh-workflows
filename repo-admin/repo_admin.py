@@ -10,6 +10,8 @@ Commands:
   branch-protection   apply a baseline branch-protection policy to each repo's
                        default branch
   security-features   enable free, native GitHub security features
+  all                 run merge-settings, branch-protection, and
+                       security-features in sequence
 
 Forks are excluded by default -- except those listed in include-forks.txt;
 edit that file to add more, or override per-run with GH_INCLUDE_FORKS
@@ -496,6 +498,34 @@ def cmd_branch_protection(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# all
+# ---------------------------------------------------------------------------
+
+
+def cmd_all(args: argparse.Namespace) -> int:
+    """Runs merge-settings, branch-protection, then security-features in
+    that order (matching the README's ordering -- merge-settings' PR-branch
+    auto-update makes branch-protection's auto-merge-friendly baseline
+    behave as intended). One command failing doesn't stop the others; the
+    exit code is nonzero if any of them failed.
+    """
+    failed = False
+    for name, cmd in (
+        ("merge-settings", cmd_merge_settings),
+        ("branch-protection", cmd_branch_protection),
+        ("security-features", cmd_security_features),
+    ):
+        print(f"== {name} ==")
+        try:
+            if cmd(args) != 0:
+                failed = True
+        except GhError as exc:
+            print(exc, file=sys.stderr)
+            failed = True
+    return 1 if failed else 0
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -527,6 +557,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("security-features", parents=[mutating_parent]).set_defaults(
         func=cmd_security_features
     )
+    subparsers.add_parser("all", parents=[mutating_parent]).set_defaults(func=cmd_all)
 
     return parser
 
