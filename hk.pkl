@@ -6,7 +6,13 @@ min_hk_version = Base.min_hk_version
 
 local linters = new Mapping<String, Step> {
     ...Base.base
+    ...Base.shell
     ...Base.python
+    ["pytest"] = {
+        dir = "repo-admin"
+        check = "uv run pytest"
+        profiles = List("ci")
+    }
 }
 
 hooks {

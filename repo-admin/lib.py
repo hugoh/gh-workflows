@@ -169,6 +169,17 @@ def default_include_forks() -> set[str]:
     return forks
 
 
+def unmatched_include_forks(
+    include_forks: set[str], repos_json: list[dict]
+) -> set[str]:
+    """include-forks.txt entries (or GH_INCLUDE_FORKS) that don't match any
+    fetched repo -- a typo, a rename, or a repo that's gone, silently going
+    stale otherwise since filter_repos() just never matches them.
+    """
+    repo_names = {entry["name"] for entry in repos_json}
+    return include_forks - repo_names
+
+
 def filter_repos(
     repos_json: list[dict],
     *,
@@ -211,9 +222,13 @@ def list_repos(
 ) -> list[Repo]:
     if include_forks is None:
         include_forks = default_include_forks()
-    return filter_repos(
-        fetch_repos_json(owner), only=only, skip=skip, include_forks=include_forks
-    )
+    repos_json = fetch_repos_json(owner)
+    for name in sorted(unmatched_include_forks(include_forks, repos_json)):
+        print(
+            f"warning: include-forks entry {name!r} doesn't match any repo",
+            file=sys.stderr,
+        )
+    return filter_repos(repos_json, only=only, skip=skip, include_forks=include_forks)
 
 
 def as_set(value: str | None) -> set[str] | None:

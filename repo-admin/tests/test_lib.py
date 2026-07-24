@@ -15,6 +15,7 @@ from lib import (
     fetch_repos_json,
     filter_repos,
     run_parallel,
+    unmatched_include_forks,
 )
 
 REPOS_JSON = [
@@ -94,6 +95,22 @@ def test_filter_repos_fields():
 def test_filter_repos_handles_null_default_branch():
     repos = filter_repos(REPOS_JSON, only={"empty-repo"})
     assert repos[0].default_branch == ""
+
+
+def test_unmatched_include_forks_returns_names_with_no_matching_repo():
+    assert unmatched_include_forks({"maintained-fork", "typo-fork"}, REPOS_JSON) == {
+        "typo-fork"
+    }
+
+
+def test_unmatched_include_forks_empty_when_all_match():
+    assert (
+        unmatched_include_forks({"maintained-fork", "public-repo"}, REPOS_JSON) == set()
+    )
+
+
+def test_unmatched_include_forks_empty_for_no_include_forks():
+    assert unmatched_include_forks(set(), REPOS_JSON) == set()
 
 
 def test_run_parallel_returns_worker_results_for_every_repo():
