@@ -373,6 +373,60 @@ def test_security_worker_apply_limited_when_unavailable_and_was_pending(monkeypa
 # ---------------------------------------------------------------------------
 
 
+def _check_runs_response(runs):
+    return {"check_runs": runs}
+
+
+def _run(name, conclusion, app_slug="github-actions"):
+    return {"name": name, "conclusion": conclusion, "app": {"slug": app_slug}}
+
+
+def test_check_run_contexts_excludes_third_party_apps(monkeypatch):
+    monkeypatch.setattr(
+        repo_admin,
+        "api_json",
+        lambda *a, **k: _check_runs_response(
+            [
+                _run("goci / goci", "success"),
+                _run("DeepSource: Analysis", "success", app_slug="deepsource-io"),
+            ]
+        ),
+    )
+    assert repo_admin._check_run_contexts("hugoh", "repo", ["sha"]) == ["goci / goci"]
+
+
+def test_check_run_contexts_replaces_skip_artifact_with_composite_alias(monkeypatch):
+    responses = {
+        "sha1": _check_runs_response(
+            [_run("hk / hk", "failure"), _run("release", "skipped")]
+        ),
+        "sha2": _check_runs_response(
+            [_run("hk / hk", "success"), _run("release / release", "success")]
+        ),
+    }
+
+    def fake_api_json(method, path, **kwargs):
+        sha = path.rsplit("/", 2)[1]
+        return responses[sha]
+
+    monkeypatch.setattr(repo_admin, "api_json", fake_api_json)
+    contexts = repo_admin._check_run_contexts("hugoh", "repo", ["sha1", "sha2"])
+    assert contexts == ["hk / hk", "release / release"]
+
+
+def test_check_run_contexts_keeps_legitimately_skipped_check(monkeypatch):
+    responses = {
+        "sha1": _check_runs_response(
+            [_run("hk / hk", "success"), _run("pages", "skipped")]
+        ),
+    }
+    monkeypatch.setattr(
+        repo_admin, "api_json", lambda method, path, **k: responses["sha1"]
+    )
+    contexts = repo_admin._check_run_contexts("hugoh", "repo", ["sha1"])
+    assert contexts == ["hk / hk", "pages"]
+
+
 def test_branch_protection_up_to_date_matches_baseline():
     current = {
         "required_status_checks": {"contexts": ["build", "test"], "strict": True},
@@ -412,7 +466,7 @@ def test_branch_protection_payload():
 
 
 def test_branch_protection_worker_limited_unchanged_when_no_prs(monkeypatch):
-    monkeypatch.setattr(repo_admin, "_latest_pr_head_sha", lambda owner, name: None)
+    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", lambda owner, name: [])
     worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=True)
     result = worker(REPO)
     assert result.status == Status.LIMITED_UNCHANGED
@@ -420,8 +474,8 @@ def test_branch_protection_worker_limited_unchanged_when_no_prs(monkeypatch):
 
 
 def test_branch_protection_worker_limited_unchanged_when_no_check_runs(monkeypatch):
-    monkeypatch.setattr(repo_admin, "_latest_pr_head_sha", lambda owner, name: "sha")
-    monkeypatch.setattr(repo_admin, "_check_run_contexts", lambda owner, name, sha: [])
+    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", lambda owner, name: ["sha"])
+    monkeypatch.setattr(repo_admin, "_check_run_contexts", lambda owner, name, shas: [])
     worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=True)
     result = worker(REPO)
     assert result.status == Status.LIMITED_UNCHANGED
@@ -431,9 +485,9 @@ def test_branch_protection_worker_limited_unchanged_when_no_check_runs(monkeypat
 def test_branch_protection_worker_dry_run_limited_unchanged_when_plan_gated(
     monkeypatch,
 ):
-    monkeypatch.setattr(repo_admin, "_latest_pr_head_sha", lambda owner, name: "sha")
+    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", lambda owner, name: ["sha"])
     monkeypatch.setattr(
-        repo_admin, "_check_run_contexts", lambda owner, name, sha: ["build"]
+        repo_admin, "_check_run_contexts", lambda owner, name, shas: ["build"]
     )
     monkeypatch.setattr(repo_admin, "api_request", lambda *a, **k: _FakeResponse(403))
     worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=True)
@@ -447,9 +501,9 @@ def test_branch_protection_worker_dry_run_limited_unchanged_when_plan_gated(
 def test_branch_protection_worker_apply_limited_unchanged_when_plan_gated(
     monkeypatch,
 ):
-    monkeypatch.setattr(repo_admin, "_latest_pr_head_sha", lambda owner, name: "sha")
+    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", lambda owner, name: ["sha"])
     monkeypatch.setattr(
-        repo_admin, "_check_run_contexts", lambda owner, name, sha: ["build"]
+        repo_admin, "_check_run_contexts", lambda owner, name, shas: ["build"]
     )
     monkeypatch.setattr(repo_admin, "api_request", lambda *a, **k: _FakeResponse(403))
     worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=False)
@@ -461,9 +515,9 @@ def test_branch_protection_worker_apply_limited_unchanged_when_plan_gated(
 
 
 def test_branch_protection_worker_dry_run_unchanged_line(monkeypatch):
-    monkeypatch.setattr(repo_admin, "_latest_pr_head_sha", lambda owner, name: "sha")
+    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", lambda owner, name: ["sha"])
     monkeypatch.setattr(
-        repo_admin, "_check_run_contexts", lambda owner, name, sha: ["build", "test"]
+        repo_admin, "_check_run_contexts", lambda owner, name, shas: ["build", "test"]
     )
     current = {
         "required_status_checks": {"contexts": ["build", "test"], "strict": True},
@@ -484,6 +538,68 @@ def test_branch_protection_worker_dry_run_unchanged_line(monkeypatch):
     result = worker(REPO)
     assert result.status == Status.UNCHANGED
     assert result.line == f"{'repo':<30} unchanged: build, test"
+
+
+def test_branch_protection_worker_apply_unchanged_when_already_protected(monkeypatch):
+    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", lambda owner, name: ["sha"])
+    monkeypatch.setattr(
+        repo_admin, "_check_run_contexts", lambda owner, name, shas: ["build", "test"]
+    )
+    current = {
+        "required_status_checks": {"contexts": ["build", "test"], "strict": True},
+        "enforce_admins": {"enabled": True},
+        "allow_force_pushes": {"enabled": False},
+        "allow_deletions": {"enabled": False},
+        "required_pull_request_reviews": {"required_approving_review_count": 0},
+    }
+
+    class _ProtectionResponse(_FakeResponse):
+        def json(self):
+            return current
+
+    calls = []
+
+    def fake_api_request(method, *a, **k):
+        calls.append(method)
+        return _ProtectionResponse(200)
+
+    monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
+    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=False)
+    result = worker(REPO)
+    assert result.status == Status.UNCHANGED
+    assert result.line == f"{'repo':<30} unchanged: build, test"
+    assert result.tag == repo_admin.Tag.APPLIED
+    assert "PUT" not in calls
+
+
+def test_branch_protection_worker_apply_ok_when_updating_from_stale_state(
+    monkeypatch,
+):
+    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", lambda owner, name: ["sha"])
+    monkeypatch.setattr(
+        repo_admin, "_check_run_contexts", lambda owner, name, shas: ["build", "test"]
+    )
+    current = {
+        "required_status_checks": {"contexts": ["build"], "strict": True},
+        "enforce_admins": {"enabled": True},
+        "allow_force_pushes": {"enabled": False},
+        "allow_deletions": {"enabled": False},
+        "required_pull_request_reviews": {"required_approving_review_count": 0},
+    }
+
+    class _ProtectionResponse(_FakeResponse):
+        def json(self):
+            return current
+
+    def fake_api_request(method, *a, **k):
+        return _ProtectionResponse(200)
+
+    monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
+    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=False)
+    result = worker(REPO)
+    assert result.status == Status.OK
+    assert result.line == f"{'repo':<30} protected (build, test)"
+    assert result.tag == repo_admin.Tag.APPLIED
 
 
 # ---------------------------------------------------------------------------
