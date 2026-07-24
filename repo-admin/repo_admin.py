@@ -29,6 +29,7 @@ from lib import (
     GhError,
     Repo,
     RepoResult,
+    Status,
     api_json,
     api_request,
     as_set,
@@ -94,7 +95,14 @@ def make_merge_settings_worker(owner: str, dry_run: bool):
     def worker(repo: Repo) -> RepoResult:
         if dry_run:
             current = _merge_settings(owner, repo.name)
-            return RepoResult(repo, merge_settings_dry_run_line(repo.name, current))
+            status = (
+                Status.UNCHANGED
+                if all(current[field] for field in MERGE_SETTINGS_FIELDS)
+                else Status.OK
+            )
+            return RepoResult(
+                repo, merge_settings_dry_run_line(repo.name, current), status
+            )
 
         before = _merge_settings(owner, repo.name)
         api_json(
@@ -103,7 +111,10 @@ def make_merge_settings_worker(owner: str, dry_run: bool):
             json={field: True for field in MERGE_SETTINGS_FIELDS},
         )
         after = _merge_settings(owner, repo.name)
-        return RepoResult(repo, merge_settings_apply_line(repo.name, before, after))
+        status = Status.UNCHANGED if before == after else Status.OK
+        return RepoResult(
+            repo, merge_settings_apply_line(repo.name, before, after), status
+        )
 
     return worker
 
@@ -210,7 +221,8 @@ def make_security_features_worker(owner: str, dry_run: bool):
             summary = security_summarize(
                 repo_json, vuln_alerts_enabled=vuln_alerts_enabled, pvr_json=pvr_json
             )
-            return RepoResult(repo, security_dry_run_line(repo.name, summary))
+            status = Status.UNCHANGED if not summary["would_enable"] else Status.OK
+            return RepoResult(repo, security_dry_run_line(repo.name, summary), status)
 
         api_json("PUT", f"/repos/{owner}/{repo.name}/vulnerability-alerts")
 
@@ -356,6 +368,7 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
             return RepoResult(
                 repo,
                 f"{repo.name:<30} no pull requests found, skipping (nothing to detect PR-gating checks from)",
+                Status.SKIPPED,
                 tag="skipped_no_checks",
             )
 
@@ -364,6 +377,7 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
             return RepoResult(
                 repo,
                 f"{repo.name:<30} no check runs found on latest PR commit {pr_head_sha}, skipping",
+                Status.SKIPPED,
                 tag="skipped_no_checks",
             )
 
@@ -376,6 +390,7 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
                 return RepoResult(
                     repo,
                     f"{repo.name:<30} cannot check: private repo, plan does not allow branch protection",
+                    Status.SKIPPED,
                 )
             if protection_response.status_code == 404:
                 current = None
@@ -389,10 +404,14 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
 
             if branch_protection_up_to_date(current, contexts):
                 return RepoResult(
-                    repo, f"{repo.name:<30} up to date ({', '.join(contexts)})"
+                    repo,
+                    f"{repo.name:<30} up to date ({', '.join(contexts)})",
+                    Status.UNCHANGED,
                 )
             return RepoResult(
-                repo, f"{repo.name:<30} would update -> require: {', '.join(contexts)}"
+                repo,
+                f"{repo.name:<30} would update -> require: {', '.join(contexts)}",
+                Status.OK,
             )
 
         payload = branch_protection_payload(contexts)
@@ -405,6 +424,7 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
             return RepoResult(
                 repo,
                 f"{repo.name:<30} skipped: private repo, plan does not allow branch protection",
+                Status.SKIPPED,
                 tag="skipped_no_plan",
             )
         if not put_response.ok:
@@ -413,7 +433,10 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
             )
 
         return RepoResult(
-            repo, f"{repo.name:<30} protected ({', '.join(contexts)})", tag="applied"
+            repo,
+            f"{repo.name:<30} protected ({', '.join(contexts)})",
+            Status.OK,
+            tag="applied",
         )
 
     return worker

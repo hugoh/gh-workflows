@@ -4,20 +4,53 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import enum
 import os
 import subprocess
 import sys
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import requests
+from rich.console import Console
 
 LIB_DIR = Path(__file__).resolve().parent
 API_BASE = "https://api.github.com"
 DEFAULT_OWNER = os.environ.get("GH_OWNER", "hugoh")
 DEFAULT_JOBS = int(os.environ.get("GH_JOBS", "6"))
+
+_console = Console()
+_stderr_console = Console(stderr=True)
+
+
+class Status(enum.Enum):
+    """How a repo's result line relates to the desired end state -- distinct
+    from RepoResult.tag, which is per-command bookkeeping used for
+    end-of-run summaries.
+    """
+
+    OK = "ok"  # applied a change, or would (dry-run)
+    UNCHANGED = "unchanged"  # already in the desired state, nothing to do
+    SKIPPED = "skipped"  # not applicable to this repo (plan gating, etc.)
+    FAILED = "failed"  # worker raised
+
+
+_STATUS_DISPLAY: dict[Status, tuple[str, str]] = {
+    Status.OK: ("✓", "green"),
+    Status.UNCHANGED: ("•", "cyan"),
+    Status.SKIPPED: ("○", "yellow"),
+    Status.FAILED: ("✗", "red"),
+}
+
+
+def print_status(status: Status, line: str, *, stderr: bool = False) -> None:
+    symbol, color = _STATUS_DISPLAY[status]
+    console = _stderr_console if stderr else _console
+    # markup=False: `line` can contain repo/error text with literal "[" (dict
+    # reprs, error messages) that would otherwise be parsed as rich markup.
+    console.print(f"{symbol} {line}", style=color, markup=False)
 
 
 class GhError(RuntimeError):
@@ -121,6 +154,7 @@ class Repo:
 class RepoResult:
     repo: Repo
     line: str
+    status: Status = field(default=Status.OK)
     tag: str | None = None
 
 
@@ -269,7 +303,7 @@ def run_parallel(
     def call(repo: Repo) -> RepoResult:
         result = worker(repo)
         with print_lock:
-            print(result.line)
+            print_status(result.status, result.line)
         return result
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
@@ -280,7 +314,8 @@ def run_parallel(
                 results.append(future.result())
             except Exception as exc:  # noqa: BLE001 -- collected below, not swallowed
                 failed_names.append(repo.name)
-                print(f"{repo.name}: {exc}", file=sys.stderr)
+                with print_lock:
+                    print_status(Status.FAILED, f"{repo.name}: {exc}", stderr=True)
 
     if failed_names:
         raise GhError(

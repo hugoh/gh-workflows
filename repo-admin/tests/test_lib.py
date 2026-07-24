@@ -8,11 +8,13 @@ from lib import (
     GhError,
     Repo,
     RepoResult,
+    Status,
     api_json,
     api_request,
     error_message,
     fetch_repos_json,
     filter_repos,
+    print_status,
     run_parallel,
     unmatched_include_forks,
 )
@@ -110,6 +112,38 @@ def test_unmatched_include_forks_empty_when_all_match():
 
 def test_unmatched_include_forks_empty_for_no_include_forks():
     assert unmatched_include_forks(set(), REPOS_JSON) == set()
+
+
+def test_repo_result_defaults_to_ok_status():
+    repo = Repo(name="repo", default_branch="main", is_private=False, is_fork=False)
+    assert RepoResult(repo, "line").status == Status.OK
+
+
+def test_print_status_prints_line_to_stdout(capsys):
+    print_status(Status.OK, "repo-a done")
+    assert "repo-a done" in capsys.readouterr().out
+
+
+def test_print_status_prints_distinct_symbols_per_status(capsys):
+    for status in Status:
+        print_status(status, "x")
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if line]
+    symbols = {line.split()[0] for line in lines}
+    assert len(symbols) == len(list(Status))
+
+
+def test_print_status_does_not_interpret_brackets_in_line_as_markup(capsys):
+    print_status(Status.OK, "repo {'allow_auto_merge': True} -> [oops]")
+    out = capsys.readouterr().out
+    assert "{'allow_auto_merge': True} -> [oops]" in out
+
+
+def test_print_status_writes_to_stderr_when_requested(capsys):
+    print_status(Status.FAILED, "bad-repo: boom", stderr=True)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "bad-repo: boom" in captured.err
 
 
 def test_run_parallel_returns_worker_results_for_every_repo():
