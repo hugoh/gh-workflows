@@ -15,6 +15,7 @@ from typing import Any
 
 import requests
 from rich.console import Console
+from rich.progress import Progress
 
 LIB_DIR = Path(__file__).resolve().parent
 API_BASE = "https://api.github.com"
@@ -291,7 +292,7 @@ def run_parallel(
     """Runs worker(repo) for each repo concurrently (a thread pool -- these
     are I/O-bound `gh`/network calls, not CPU-bound work), printing each
     result's line as soon as it's ready (completion order, not submission
-    order) and returning every RepoResult.
+    order) above a live progress bar, and returning every RepoResult.
 
     A worker exception is caught, reported to stderr, and doesn't stop the
     other repos from running -- but once every repo has been attempted, any
@@ -308,16 +309,19 @@ def run_parallel(
             print_status(result.status, result.line)
         return result
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
-        futures = {pool.submit(call, repo): repo for repo in repos}
-        for future in concurrent.futures.as_completed(futures):
-            repo = futures[future]
-            try:
-                results.append(future.result())
-            except Exception as exc:  # noqa: BLE001 -- collected below, not swallowed
-                failed_names.append(repo.name)
-                with print_lock:
-                    print_status(Status.FAILED, f"{repo.name}: {exc}", stderr=True)
+    with Progress(console=_console) as progress:
+        task = progress.add_task("Processing repos...", total=len(repos))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+            futures = {pool.submit(call, repo): repo for repo in repos}
+            for future in concurrent.futures.as_completed(futures):
+                repo = futures[future]
+                try:
+                    results.append(future.result())
+                except Exception as exc:  # noqa: BLE001 -- collected below, not swallowed
+                    failed_names.append(repo.name)
+                    with print_lock:
+                        print_status(Status.FAILED, f"{repo.name}: {exc}", stderr=True)
+                progress.advance(task)
 
     if failed_names:
         raise GhError(
