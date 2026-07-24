@@ -1,6 +1,5 @@
-from lib import Repo
-
 import repo_admin
+from lib import Repo
 
 REPO = Repo(name="repo", default_branch="main", is_private=False, is_fork=False)
 

@@ -3,7 +3,6 @@ import time
 
 import pytest
 import responses
-
 from lib import (
     API_BASE,
     GhError,
