@@ -15,10 +15,9 @@ def test_merge_settings_dry_run_line_up_to_date():
         "delete_branch_on_merge": True,
         "allow_update_branch": True,
     }
-    assert (
-        repo_admin.merge_settings_dry_run_line("repo", current)
-        == f"{'repo':<30} up to date"
-    )
+    assert repo_admin.merge_settings_dry_run_line(
+        "repo", current, Status.UNCHANGED
+    ) == (f"{'repo':<30} unchanged: {current}")
 
 
 def test_merge_settings_dry_run_line_lists_disabled_in_field_order():
@@ -27,7 +26,7 @@ def test_merge_settings_dry_run_line_lists_disabled_in_field_order():
         "delete_branch_on_merge": True,
         "allow_update_branch": False,
     }
-    line = repo_admin.merge_settings_dry_run_line("repo", current)
+    line = repo_admin.merge_settings_dry_run_line("repo", current, Status.OK)
     assert line == f"{'repo':<30} would enable: allow_auto_merge, allow_update_branch"
 
 
@@ -37,10 +36,9 @@ def test_merge_settings_apply_line_unchanged():
         "delete_branch_on_merge": True,
         "allow_update_branch": True,
     }
-    assert (
-        repo_admin.merge_settings_apply_line("repo", settings, settings)
-        == f"{'repo':<30} unchanged {settings}"
-    )
+    assert repo_admin.merge_settings_apply_line(
+        "repo", settings, settings, Status.UNCHANGED
+    ) == (f"{'repo':<30} unchanged: {settings}")
 
 
 def test_merge_settings_apply_line_changed():
@@ -54,7 +52,7 @@ def test_merge_settings_apply_line_changed():
         "delete_branch_on_merge": True,
         "allow_update_branch": True,
     }
-    line = repo_admin.merge_settings_apply_line("repo", before, after)
+    line = repo_admin.merge_settings_apply_line("repo", before, after, Status.OK)
     assert line == f"{'repo':<30} {before} -> {after}"
 
 
@@ -219,14 +217,16 @@ def test_security_summarize_reports_unavailable_for_private_repo():
 
 def test_security_dry_run_line_up_to_date():
     line = repo_admin.security_dry_run_line(
-        "repo", {"would_enable": [], "unavailable": []}
+        "repo", {"would_enable": [], "unavailable": []}, Status.UNCHANGED
     )
-    assert line == f"{'repo':<30} up to date"
+    assert line == f"{'repo':<30} unchanged: enabled"
 
 
 def test_security_dry_run_line_would_enable_and_unavailable():
     line = repo_admin.security_dry_run_line(
-        "repo", {"would_enable": ["vuln_alerts"], "unavailable": ["push_protection"]}
+        "repo",
+        {"would_enable": ["vuln_alerts"], "unavailable": ["push_protection"]},
+        Status.LIMITED,
     )
     assert (
         line == f"{'repo':<30} would enable: vuln_alerts (unavailable: push_protection)"
@@ -323,7 +323,9 @@ def test_security_worker_apply_unchanged_when_already_fully_enabled(monkeypatch)
         dry_run=False,
         api_responses=[_FakeResponse(200), _FakeResponse(200)],
     )
-    assert worker(REPO).status == Status.UNCHANGED
+    result = worker(REPO)
+    assert result.status == Status.UNCHANGED
+    assert result.line == f"{'repo':<30} unchanged: enabled"
 
 
 def test_security_worker_apply_ok_when_newly_enabled(monkeypatch):
@@ -410,14 +412,18 @@ def test_branch_protection_payload():
 def test_branch_protection_worker_limited_unchanged_when_no_prs(monkeypatch):
     monkeypatch.setattr(repo_admin, "_latest_pr_head_sha", lambda owner, name: None)
     worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=True)
-    assert worker(REPO).status == Status.LIMITED_UNCHANGED
+    result = worker(REPO)
+    assert result.status == Status.LIMITED_UNCHANGED
+    assert result.line.startswith(f"{'repo':<30} unchanged: no pull requests found")
 
 
 def test_branch_protection_worker_limited_unchanged_when_no_check_runs(monkeypatch):
     monkeypatch.setattr(repo_admin, "_latest_pr_head_sha", lambda owner, name: "sha")
     monkeypatch.setattr(repo_admin, "_check_run_contexts", lambda owner, name, sha: [])
     worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=True)
-    assert worker(REPO).status == Status.LIMITED_UNCHANGED
+    result = worker(REPO)
+    assert result.status == Status.LIMITED_UNCHANGED
+    assert result.line.startswith(f"{'repo':<30} unchanged: no check runs found")
 
 
 def test_branch_protection_worker_dry_run_limited_unchanged_when_plan_gated(
@@ -429,7 +435,11 @@ def test_branch_protection_worker_dry_run_limited_unchanged_when_plan_gated(
     )
     monkeypatch.setattr(repo_admin, "api_request", lambda *a, **k: _FakeResponse(403))
     worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=True)
-    assert worker(REPO).status == Status.LIMITED_UNCHANGED
+    result = worker(REPO)
+    assert result.status == Status.LIMITED_UNCHANGED
+    assert result.line == (
+        f"{'repo':<30} unchanged: private repo, plan does not allow branch protection"
+    )
 
 
 def test_branch_protection_worker_apply_limited_unchanged_when_plan_gated(
@@ -441,4 +451,34 @@ def test_branch_protection_worker_apply_limited_unchanged_when_plan_gated(
     )
     monkeypatch.setattr(repo_admin, "api_request", lambda *a, **k: _FakeResponse(403))
     worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=False)
-    assert worker(REPO).status == Status.LIMITED_UNCHANGED
+    result = worker(REPO)
+    assert result.status == Status.LIMITED_UNCHANGED
+    assert result.line == (
+        f"{'repo':<30} unchanged: private repo, plan does not allow branch protection"
+    )
+
+
+def test_branch_protection_worker_dry_run_unchanged_line(monkeypatch):
+    monkeypatch.setattr(repo_admin, "_latest_pr_head_sha", lambda owner, name: "sha")
+    monkeypatch.setattr(
+        repo_admin, "_check_run_contexts", lambda owner, name, sha: ["build", "test"]
+    )
+    current = {
+        "required_status_checks": {"contexts": ["build", "test"], "strict": True},
+        "enforce_admins": {"enabled": True},
+        "allow_force_pushes": {"enabled": False},
+        "allow_deletions": {"enabled": False},
+        "required_pull_request_reviews": {"required_approving_review_count": 0},
+    }
+
+    class _ProtectionResponse(_FakeResponse):
+        def json(self):
+            return current
+
+    monkeypatch.setattr(
+        repo_admin, "api_request", lambda *a, **k: _ProtectionResponse(200)
+    )
+    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=True)
+    result = worker(REPO)
+    assert result.status == Status.UNCHANGED
+    assert result.line == f"{'repo':<30} unchanged: build, test"

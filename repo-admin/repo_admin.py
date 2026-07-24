@@ -35,6 +35,7 @@ from lib import (
     as_set,
     error_message,
     list_repos,
+    result_line,
     run_parallel,
 )
 
@@ -82,17 +83,19 @@ def merge_settings_at_target(settings: dict) -> bool:
     return all(settings[field] for field in MERGE_SETTINGS_FIELDS)
 
 
-def merge_settings_dry_run_line(name: str, current: dict) -> str:
+def merge_settings_dry_run_line(name: str, current: dict, status: Status) -> str:
     would_enable = [field for field in MERGE_SETTINGS_FIELDS if not current[field]]
-    if not would_enable:
-        return f"{name:<30} up to date"
-    return f"{name:<30} would enable: {', '.join(would_enable)}"
+    detail = (
+        str(current) if not would_enable else f"would enable: {', '.join(would_enable)}"
+    )
+    return result_line(name, detail, status)
 
 
-def merge_settings_apply_line(name: str, before: dict, after: dict) -> str:
-    if before == after:
-        return f"{name:<30} unchanged {after}"
-    return f"{name:<30} {before} -> {after}"
+def merge_settings_apply_line(
+    name: str, before: dict, after: dict, status: Status
+) -> str:
+    detail = str(after) if before == after else f"{before} -> {after}"
+    return result_line(name, detail, status)
 
 
 def make_merge_settings_worker(owner: str, dry_run: bool):
@@ -103,7 +106,7 @@ def make_merge_settings_worker(owner: str, dry_run: bool):
                 Status.UNCHANGED if merge_settings_at_target(current) else Status.OK
             )
             return RepoResult(
-                repo, merge_settings_dry_run_line(repo.name, current), status
+                repo, merge_settings_dry_run_line(repo.name, current, status), status
             )
 
         before = _merge_settings(owner, repo.name)
@@ -119,7 +122,7 @@ def make_merge_settings_worker(owner: str, dry_run: bool):
         else:
             status = Status.LIMITED_UNCHANGED if unchanged else Status.LIMITED
         return RepoResult(
-            repo, merge_settings_apply_line(repo.name, before, after), status
+            repo, merge_settings_apply_line(repo.name, before, after, status), status
         )
 
     return worker
@@ -182,16 +185,14 @@ def security_summarize(
     }
 
 
-def security_dry_run_line(name: str, summary: dict) -> str:
+def security_dry_run_line(name: str, summary: dict, status: Status) -> str:
     would_enable, unavailable = summary["would_enable"], summary["unavailable"]
-    line = (
-        f"{name:<30} up to date"
-        if not would_enable
-        else f"{name:<30} would enable: {', '.join(would_enable)}"
+    detail = (
+        "enabled" if not would_enable else f"would enable: {', '.join(would_enable)}"
     )
     if unavailable:
-        line += f" (unavailable: {', '.join(unavailable)})"
-    return line
+        detail += f" (unavailable: {', '.join(unavailable)})"
+    return result_line(name, detail, status)
 
 
 def _fetch_security_state(owner: str, name: str) -> tuple[dict, bool, dict | None]:
@@ -237,7 +238,7 @@ def make_security_features_worker(owner: str, dry_run: bool):
                 before_summary["unavailable"], bool(before_summary["would_enable"])
             )
             return RepoResult(
-                repo, security_dry_run_line(repo.name, before_summary), status
+                repo, security_dry_run_line(repo.name, before_summary, status), status
             )
 
         api_json("PUT", f"/repos/{owner}/{repo.name}/vulnerability-alerts")
@@ -277,14 +278,13 @@ def make_security_features_worker(owner: str, dry_run: bool):
             )
 
         status = security_status(unavailable, bool(before_summary["would_enable"]))
-        if not unavailable:
-            return RepoResult(repo, f"{repo.name:<30} enabled", status)
-        return RepoResult(
-            repo,
-            f"{repo.name:<30} enabled (unavailable: {', '.join(unavailable)})",
-            status,
-            tag="unavailable",
-        )
+        detail = "enabled"
+        if unavailable:
+            detail += f" (unavailable: {', '.join(unavailable)})"
+            return RepoResult(
+                repo, result_line(repo.name, detail, status), status, tag="unavailable"
+            )
+        return RepoResult(repo, result_line(repo.name, detail, status), status)
 
     return worker
 
@@ -383,19 +383,23 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
     def worker(repo: Repo) -> RepoResult:
         pr_head_sha = _latest_pr_head_sha(owner, repo.name)
         if pr_head_sha is None:
+            status = Status.LIMITED_UNCHANGED
+            detail = "no pull requests found, skipping (nothing to detect PR-gating checks from)"
             return RepoResult(
                 repo,
-                f"{repo.name:<30} no pull requests found, skipping (nothing to detect PR-gating checks from)",
-                Status.LIMITED_UNCHANGED,
+                result_line(repo.name, detail, status),
+                status,
                 tag="skipped_no_checks",
             )
 
         contexts = _check_run_contexts(owner, repo.name, pr_head_sha)
         if not contexts:
+            status = Status.LIMITED_UNCHANGED
+            detail = f"no check runs found on latest PR commit {pr_head_sha}, skipping"
             return RepoResult(
                 repo,
-                f"{repo.name:<30} no check runs found on latest PR commit {pr_head_sha}, skipping",
-                Status.LIMITED_UNCHANGED,
+                result_line(repo.name, detail, status),
+                status,
                 tag="skipped_no_checks",
             )
 
@@ -405,11 +409,9 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
                 f"/repos/{owner}/{repo.name}/branches/{repo.default_branch}/protection",
             )
             if protection_response.status_code == 403:
-                return RepoResult(
-                    repo,
-                    f"{repo.name:<30} cannot check: private repo, plan does not allow branch protection",
-                    Status.LIMITED_UNCHANGED,
-                )
+                status = Status.LIMITED_UNCHANGED
+                detail = "private repo, plan does not allow branch protection"
+                return RepoResult(repo, result_line(repo.name, detail, status), status)
             if protection_response.status_code == 404:
                 current = None
             elif protection_response.ok:
@@ -421,16 +423,12 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
                 )
 
             if branch_protection_up_to_date(current, contexts):
-                return RepoResult(
-                    repo,
-                    f"{repo.name:<30} up to date ({', '.join(contexts)})",
-                    Status.UNCHANGED,
-                )
-            return RepoResult(
-                repo,
-                f"{repo.name:<30} would update -> require: {', '.join(contexts)}",
-                Status.OK,
-            )
+                status = Status.UNCHANGED
+                detail = ", ".join(contexts)
+                return RepoResult(repo, result_line(repo.name, detail, status), status)
+            status = Status.OK
+            detail = f"would update -> require: {', '.join(contexts)}"
+            return RepoResult(repo, result_line(repo.name, detail, status), status)
 
         payload = branch_protection_payload(contexts)
         put_response = api_request(
@@ -439,10 +437,12 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
             json=payload,
         )
         if put_response.status_code == 403:
+            status = Status.LIMITED_UNCHANGED
+            detail = "private repo, plan does not allow branch protection"
             return RepoResult(
                 repo,
-                f"{repo.name:<30} skipped: private repo, plan does not allow branch protection",
-                Status.LIMITED_UNCHANGED,
+                result_line(repo.name, detail, status),
+                status,
                 tag="skipped_no_plan",
             )
         if not put_response.ok:
@@ -450,11 +450,10 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
                 error_message(put_response), status_code=put_response.status_code
             )
 
+        status = Status.OK
+        detail = f"protected ({', '.join(contexts)})"
         return RepoResult(
-            repo,
-            f"{repo.name:<30} protected ({', '.join(contexts)})",
-            Status.OK,
-            tag="applied",
+            repo, result_line(repo.name, detail, status), status, tag="applied"
         )
 
     return worker

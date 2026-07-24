@@ -16,6 +16,7 @@ from lib import (
     fetch_repos_json,
     filter_repos,
     print_status,
+    result_line,
     run_parallel,
     unmatched_include_forks,
 )
@@ -123,6 +124,23 @@ def test_repo_result_defaults_to_ok_status():
 def test_print_status_prints_line_to_stdout(capsys):
     print_status(Status.OK, "repo-a done")
     assert "repo-a done" in capsys.readouterr().out
+
+
+def test_result_line_prefixes_unchanged_status():
+    assert result_line("repo", "up to date detail", Status.UNCHANGED) == (
+        f"{'repo':<30} unchanged: up to date detail"
+    )
+
+
+def test_result_line_prefixes_limited_unchanged_status():
+    assert result_line("repo", "capped detail", Status.LIMITED_UNCHANGED) == (
+        f"{'repo':<30} unchanged: capped detail"
+    )
+
+
+@pytest.mark.parametrize("status", [Status.OK, Status.LIMITED, Status.FAILED])
+def test_result_line_does_not_prefix_changed_statuses(status):
+    assert result_line("repo", "detail", status) == f"{'repo':<30} detail"
 
 
 def test_status_display_pairs_are_unique_per_status():

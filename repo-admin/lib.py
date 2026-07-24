@@ -48,12 +48,22 @@ _STATUS_DISPLAY: dict[Status, tuple[str, str]] = {
 }
 
 
+def result_line(name: str, detail: str, status: Status) -> str:
+    prefix = (
+        "unchanged: " if status in (Status.UNCHANGED, Status.LIMITED_UNCHANGED) else ""
+    )
+    return f"{name:<30} {prefix}{detail}"
+
+
 def print_status(status: Status, line: str, *, stderr: bool = False) -> None:
     symbol, color = _STATUS_DISPLAY[status]
     console = _stderr_console if stderr else _console
     # markup=False: `line` can contain repo/error text with literal "[" (dict
     # reprs, error messages) that would otherwise be parsed as rich markup.
-    console.print(f"{symbol} {line}", style=color, markup=False)
+    # highlight=False: rich's default ReprHighlighter recolors numbers,
+    # paths, etc. within the line (e.g. a repo named "foo-410"), fighting
+    # with the single status color we want for the whole line.
+    console.print(f"{symbol} {line}", style=color, markup=False, highlight=False)
 
 
 class GhError(RuntimeError):
