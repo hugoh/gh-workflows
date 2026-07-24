@@ -340,6 +340,12 @@ def cmd_security_features(args: argparse.Namespace) -> int:
 # is fine to require -- GitHub reports that as a passing "skipped" check.)
 # Sampling an actual PR's check runs avoids picking up the former case.
 #
+# Only check runs reported by the "github-actions" app are considered:
+# third-party apps (DeepSource, Codecov, etc.) aren't defined by the repo
+# itself, can be reconfigured or removed outside of this tool's control, and
+# shouldn't be able to block merges as a side effect of having run once on a
+# PR.
+#
 # Private repos on a plan that doesn't expose branch protection return a 403
 # ("Upgrade to GitHub Pro..."); those are collected and reported at the end
 # rather than treated as a hard failure.
@@ -373,23 +379,69 @@ def branch_protection_up_to_date(current: dict | None, contexts: list[str]) -> b
     )
 
 
-def _latest_pr_head_sha(owner: str, name: str) -> str | None:
+_PR_SAMPLE_SIZE = "5"
+
+
+def _recent_pr_head_shas(owner: str, name: str) -> list[str]:
     pulls = api_json(
         "GET",
         f"/repos/{owner}/{name}/pulls",
         params={
             "state": "all",
-            "per_page": "1",
+            "per_page": _PR_SAMPLE_SIZE,
             "sort": "updated",
             "direction": "desc",
         },
     )
-    return pulls[0]["head"]["sha"] if pulls else None
+    return [pull["head"]["sha"] for pull in pulls]
 
 
-def _check_run_contexts(owner: str, name: str, sha: str) -> list[str]:
+def _github_actions_check_runs(owner: str, name: str, sha: str) -> list[dict]:
     data = api_json("GET", f"/repos/{owner}/{name}/commits/{sha}/check-runs")
-    return sorted({run["name"] for run in data["check_runs"]})
+    return [
+        run
+        for run in data["check_runs"]
+        if (run.get("app") or {}).get("slug") == "github-actions"
+    ]
+
+
+def _check_run_contexts(owner: str, name: str, shas: list[str]) -> list[str]:
+    """Contexts to require, sampled from the most recent PR's head commit.
+
+    A job that calls a reusable workflow via `uses:` alongside a `needs:`
+    dependency reports under two different names depending on outcome: its
+    own job id (e.g. "release") when a failed dependency causes it to skip
+    before ever invoking the reusable workflow, or a composite name (e.g.
+    "release / release") once it actually runs. Landing on a PR where that
+    dependency failed would require the skip-only name, which then never
+    posts again once the dependency passes -- leaving future PRs stuck
+    pending forever. So a bare, skipped name is replaced with a composite
+    alias ("<name> / ...") if one shows up, actually run, anywhere in a
+    short recent-PR window.
+    """
+    latest_runs = _github_actions_check_runs(owner, name, shas[0])
+    contexts = {run["name"] for run in latest_runs}
+    suspect = {
+        run["name"]
+        for run in latest_runs
+        if run["conclusion"] == "skipped" and " / " not in run["name"]
+    }
+    if not suspect:
+        return sorted(contexts)
+
+    for sha in shas[1:]:
+        if not suspect:
+            break
+        for run in _github_actions_check_runs(owner, name, sha):
+            if run["conclusion"] == "skipped":
+                continue
+            base = run["name"].split(" / ", 1)[0]
+            if base in suspect:
+                contexts.discard(base)
+                contexts.add(run["name"])
+                suspect.discard(base)
+
+    return sorted(contexts)
 
 
 def _skip_result(repo: Repo, detail: str, tag: Tag) -> RepoResult:
@@ -405,46 +457,56 @@ def _plan_gated_result(repo: Repo, *, tag: Tag | None = None) -> RepoResult:
 
 def make_branch_protection_worker(owner: str, dry_run: bool):
     def worker(repo: Repo) -> RepoResult:
-        pr_head_sha = _latest_pr_head_sha(owner, repo.name)
-        if pr_head_sha is None:
+        pr_head_shas = _recent_pr_head_shas(owner, repo.name)
+        if not pr_head_shas:
             return _skip_result(
                 repo,
                 "no pull requests found, skipping (nothing to detect PR-gating checks from)",
                 Tag.SKIPPED_NO_CHECKS,
             )
 
-        contexts = _check_run_contexts(owner, repo.name, pr_head_sha)
+        contexts = _check_run_contexts(owner, repo.name, pr_head_shas)
         if not contexts:
             return _skip_result(
                 repo,
-                f"no check runs found on latest PR commit {pr_head_sha}, skipping",
+                f"no check runs found on latest PR commit {pr_head_shas[0]}, skipping",
                 Tag.SKIPPED_NO_CHECKS,
             )
 
-        if dry_run:
-            protection_response = api_request(
-                "GET",
-                f"/repos/{owner}/{repo.name}/branches/{repo.default_branch}/protection",
+        protection_response = api_request(
+            "GET",
+            f"/repos/{owner}/{repo.name}/branches/{repo.default_branch}/protection",
+        )
+        if protection_response.status_code == 403:
+            return _plan_gated_result(
+                repo, tag=Tag.SKIPPED_NO_PLAN if not dry_run else None
             )
-            if protection_response.status_code == 403:
-                return _plan_gated_result(repo)
-            if protection_response.status_code == 404:
-                current = None
-            elif protection_response.ok:
-                current = protection_response.json()
-            else:
-                raise GhError(
-                    error_message(protection_response),
-                    status_code=protection_response.status_code,
-                )
+        if protection_response.status_code == 404:
+            current = None
+        elif protection_response.ok:
+            current = protection_response.json()
+        else:
+            raise GhError(
+                error_message(protection_response),
+                status_code=protection_response.status_code,
+            )
+        up_to_date = branch_protection_up_to_date(current, contexts)
 
-            if branch_protection_up_to_date(current, contexts):
+        if dry_run:
+            if up_to_date:
                 status = Status.UNCHANGED
                 detail = ", ".join(contexts)
                 return RepoResult(repo, result_line(repo.name, detail, status), status)
             status = Status.OK
             detail = f"would update -> require: {', '.join(contexts)}"
             return RepoResult(repo, result_line(repo.name, detail, status), status)
+
+        if up_to_date:
+            status = Status.UNCHANGED
+            detail = ", ".join(contexts)
+            return RepoResult(
+                repo, result_line(repo.name, detail, status), status, tag=Tag.APPLIED
+            )
 
         payload = branch_protection_payload(contexts)
         put_response = api_request(
