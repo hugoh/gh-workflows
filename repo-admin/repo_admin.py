@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Bulk-applies account-wide GitHub repo settings across hugoh's non-archived
 repos, via the GitHub REST API (authenticated through `gh auth token`).
 
@@ -22,6 +21,7 @@ first and review the output.
 from __future__ import annotations
 
 import argparse
+import enum
 import sys
 
 from lib import (
@@ -33,11 +33,24 @@ from lib import (
     api_json,
     api_request,
     as_set,
+    classify_status,
     error_message,
     list_repos,
     result_line,
     run_parallel,
 )
+
+
+class Tag(enum.StrEnum):
+    """Per-command bookkeeping for end-of-run summaries -- distinct from
+    Status, which is the shared display concept in lib.py.
+    """
+
+    APPLIED = "applied"
+    SKIPPED_NO_CHECKS = "skipped_no_checks"
+    SKIPPED_NO_PLAN = "skipped_no_plan"
+    UNAVAILABLE = "unavailable"
+
 
 # ---------------------------------------------------------------------------
 # list
@@ -116,11 +129,9 @@ def make_merge_settings_worker(owner: str, dry_run: bool):
             json={field: True for field in MERGE_SETTINGS_FIELDS},
         )
         after = _merge_settings(owner, repo.name)
-        unchanged = before == after
-        if merge_settings_at_target(after):
-            status = Status.UNCHANGED if unchanged else Status.OK
-        else:
-            status = Status.LIMITED_UNCHANGED if unchanged else Status.LIMITED
+        status = classify_status(
+            at_target=merge_settings_at_target(after), changed=before != after
+        )
         return RepoResult(
             repo, merge_settings_apply_line(repo.name, before, after, status), status
         )
@@ -218,12 +229,6 @@ def _fetch_security_state(owner: str, name: str) -> tuple[dict, bool, dict | Non
     return repo_json, vuln_alerts_enabled, pvr_json
 
 
-def security_status(unavailable: list, changed: bool) -> Status:
-    if unavailable:
-        return Status.LIMITED if changed else Status.LIMITED_UNCHANGED
-    return Status.OK if changed else Status.UNCHANGED
-
-
 def make_security_features_worker(owner: str, dry_run: bool):
     def worker(repo: Repo) -> RepoResult:
         repo_json, vuln_alerts_enabled, pvr_json = _fetch_security_state(
@@ -234,8 +239,9 @@ def make_security_features_worker(owner: str, dry_run: bool):
         )
 
         if dry_run:
-            status = security_status(
-                before_summary["unavailable"], bool(before_summary["would_enable"])
+            status = classify_status(
+                at_target=not before_summary["unavailable"],
+                changed=bool(before_summary["would_enable"]),
             )
             return RepoResult(
                 repo, security_dry_run_line(repo.name, before_summary, status), status
@@ -277,12 +283,17 @@ def make_security_features_worker(owner: str, dry_run: bool):
                 error_message(pvr_response), status_code=pvr_response.status_code
             )
 
-        status = security_status(unavailable, bool(before_summary["would_enable"]))
+        status = classify_status(
+            at_target=not unavailable, changed=bool(before_summary["would_enable"])
+        )
         detail = "enabled"
         if unavailable:
             detail += f" (unavailable: {', '.join(unavailable)})"
             return RepoResult(
-                repo, result_line(repo.name, detail, status), status, tag="unavailable"
+                repo,
+                result_line(repo.name, detail, status),
+                status,
+                tag=Tag.UNAVAILABLE,
             )
         return RepoResult(repo, result_line(repo.name, detail, status), status)
 
@@ -298,7 +309,7 @@ def cmd_security_features(args: argparse.Namespace) -> int:
     if args.dry_run:
         return 0
 
-    unavailable = sorted(r.repo.name for r in results if r.tag == "unavailable")
+    unavailable = sorted(r.repo.name for r in results if r.tag == Tag.UNAVAILABLE)
     print()
     print("Summary:")
     print(
@@ -379,28 +390,33 @@ def _check_run_contexts(owner: str, name: str, sha: str) -> list[str]:
     return sorted({run["name"] for run in data["check_runs"]})
 
 
+def _skip_result(repo: Repo, detail: str, tag: Tag) -> RepoResult:
+    status = Status.LIMITED_UNCHANGED
+    return RepoResult(repo, result_line(repo.name, detail, status), status, tag=tag)
+
+
+def _plan_gated_result(repo: Repo, *, tag: Tag | None = None) -> RepoResult:
+    status = Status.LIMITED_UNCHANGED
+    detail = "private repo, plan does not allow branch protection"
+    return RepoResult(repo, result_line(repo.name, detail, status), status, tag=tag)
+
+
 def make_branch_protection_worker(owner: str, dry_run: bool):
     def worker(repo: Repo) -> RepoResult:
         pr_head_sha = _latest_pr_head_sha(owner, repo.name)
         if pr_head_sha is None:
-            status = Status.LIMITED_UNCHANGED
-            detail = "no pull requests found, skipping (nothing to detect PR-gating checks from)"
-            return RepoResult(
+            return _skip_result(
                 repo,
-                result_line(repo.name, detail, status),
-                status,
-                tag="skipped_no_checks",
+                "no pull requests found, skipping (nothing to detect PR-gating checks from)",
+                Tag.SKIPPED_NO_CHECKS,
             )
 
         contexts = _check_run_contexts(owner, repo.name, pr_head_sha)
         if not contexts:
-            status = Status.LIMITED_UNCHANGED
-            detail = f"no check runs found on latest PR commit {pr_head_sha}, skipping"
-            return RepoResult(
+            return _skip_result(
                 repo,
-                result_line(repo.name, detail, status),
-                status,
-                tag="skipped_no_checks",
+                f"no check runs found on latest PR commit {pr_head_sha}, skipping",
+                Tag.SKIPPED_NO_CHECKS,
             )
 
         if dry_run:
@@ -409,9 +425,7 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
                 f"/repos/{owner}/{repo.name}/branches/{repo.default_branch}/protection",
             )
             if protection_response.status_code == 403:
-                status = Status.LIMITED_UNCHANGED
-                detail = "private repo, plan does not allow branch protection"
-                return RepoResult(repo, result_line(repo.name, detail, status), status)
+                return _plan_gated_result(repo)
             if protection_response.status_code == 404:
                 current = None
             elif protection_response.ok:
@@ -437,14 +451,7 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
             json=payload,
         )
         if put_response.status_code == 403:
-            status = Status.LIMITED_UNCHANGED
-            detail = "private repo, plan does not allow branch protection"
-            return RepoResult(
-                repo,
-                result_line(repo.name, detail, status),
-                status,
-                tag="skipped_no_plan",
-            )
+            return _plan_gated_result(repo, tag=Tag.SKIPPED_NO_PLAN)
         if not put_response.ok:
             raise GhError(
                 error_message(put_response), status_code=put_response.status_code
@@ -453,7 +460,7 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
         status = Status.OK
         detail = f"protected ({', '.join(contexts)})"
         return RepoResult(
-            repo, result_line(repo.name, detail, status), status, tag="applied"
+            repo, result_line(repo.name, detail, status), status, tag=Tag.APPLIED
         )
 
     return worker
@@ -468,11 +475,13 @@ def cmd_branch_protection(args: argparse.Namespace) -> int:
     if args.dry_run:
         return 0
 
-    applied = [r for r in results if r.tag == "applied"]
+    applied = [r for r in results if r.tag == Tag.APPLIED]
     skipped_no_checks = sorted(
-        r.repo.name for r in results if r.tag == "skipped_no_checks"
+        r.repo.name for r in results if r.tag == Tag.SKIPPED_NO_CHECKS
     )
-    skipped_no_plan = sorted(r.repo.name for r in results if r.tag == "skipped_no_plan")
+    skipped_no_plan = sorted(
+        r.repo.name for r in results if r.tag == Tag.SKIPPED_NO_PLAN
+    )
     print()
     print("Summary:")
     print(f"  Protected: {len(applied)}")

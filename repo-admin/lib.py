@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import argparse
 import concurrent.futures
 import enum
 import os
 import subprocess
 import sys
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +22,6 @@ DEFAULT_OWNER = os.environ.get("GH_OWNER", "hugoh")
 DEFAULT_JOBS = int(os.environ.get("GH_JOBS", "6"))
 
 _console = Console()
-_stderr_console = Console(stderr=True)
 
 
 class Status(enum.Enum):
@@ -48,6 +46,12 @@ _STATUS_DISPLAY: dict[Status, tuple[str, str]] = {
 }
 
 
+def classify_status(at_target: bool, changed: bool) -> Status:
+    if at_target:
+        return Status.OK if changed else Status.UNCHANGED
+    return Status.LIMITED if changed else Status.LIMITED_UNCHANGED
+
+
 def result_line(name: str, detail: str, status: Status) -> str:
     prefix = (
         "unchanged: " if status in (Status.UNCHANGED, Status.LIMITED_UNCHANGED) else ""
@@ -55,15 +59,19 @@ def result_line(name: str, detail: str, status: Status) -> str:
     return f"{name:<30} {prefix}{detail}"
 
 
-def print_status(status: Status, line: str, *, stderr: bool = False) -> None:
+def print_status(status: Status, line: str) -> None:
+    # Always goes through the single Console that Progress/Live owns
+    # (run_parallel passes it to Progress(console=...)): a second Console
+    # writing to a separate stream isn't coordinated by rich's Live
+    # redraw bookkeeping and can visually corrupt output on a real
+    # terminal (see run_parallel's failure-path comment).
     symbol, color = _STATUS_DISPLAY[status]
-    console = _stderr_console if stderr else _console
     # markup=False: `line` can contain repo/error text with literal "[" (dict
     # reprs, error messages) that would otherwise be parsed as rich markup.
     # highlight=False: rich's default ReprHighlighter recolors numbers,
     # paths, etc. within the line (e.g. a repo named "foo-410"), fighting
     # with the single status color we want for the whole line.
-    console.print(f"{symbol} {line}", style=color, markup=False, highlight=False)
+    _console.print(f"{symbol} {line}", style=color, markup=False, highlight=False)
 
 
 class GhError(RuntimeError):
@@ -167,7 +175,7 @@ class Repo:
 class RepoResult:
     repo: Repo
     line: str
-    status: Status = field(default=Status.OK)
+    status: Status = Status.OK
     tag: str | None = None
 
 
@@ -284,18 +292,6 @@ def as_set(value: str | None) -> set[str] | None:
     return {v.strip() for v in value.split(",") if v.strip()}
 
 
-def common_arg_parser(description: str) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=description)
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="show what would change, without changing anything",
-    )
-    parser.add_argument("--only", help="comma-separated repo names to include")
-    parser.add_argument("--skip", help="comma-separated repo names to exclude")
-    return parser
-
-
 def run_parallel(
     repos: list[Repo], worker, jobs: int = DEFAULT_JOBS
 ) -> list[RepoResult]:
@@ -304,9 +300,10 @@ def run_parallel(
     result's line as soon as it's ready (completion order, not submission
     order) above a live progress bar, and returning every RepoResult.
 
-    A worker exception is caught, reported to stderr, and doesn't stop the
-    other repos from running -- but once every repo has been attempted, any
-    failures are raised together as a single GhError so the run still ends
+    A worker exception is caught, printed as a failure line, and doesn't
+    stop the other repos from running -- but once every repo has been
+    attempted, any failures are raised together as a single GhError so
+    the run still ends
     with a nonzero exit.
     """
     results = []
@@ -330,7 +327,7 @@ def run_parallel(
                 except Exception as exc:  # noqa: BLE001 -- collected below, not swallowed
                     failed_names.append(repo.name)
                     with print_lock:
-                        print_status(Status.FAILED, f"{repo.name}: {exc}", stderr=True)
+                        print_status(Status.FAILED, f"{repo.name}: {exc}")
                 progress.advance(task)
 
     if failed_names:

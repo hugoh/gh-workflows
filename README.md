@@ -74,7 +74,7 @@ uv run repo_admin.py <command> [--dry-run] [--only name1,name2] [--skip name1,na
   Required contexts are detected from the most recent pull request's check
   runs (not the default branch tip — see `repo_admin.py`'s header comment
   for why). `--dry-run` diffs each repo's current protection against the
-  baseline and prints "up to date" or "would update", rather than just
+  baseline and prints "unchanged: ..." or "would update", rather than just
   showing what would be required. Private repos on a plan without
   branch-protection access are reported, not failed.
 - **`security-features [--dry-run]`** — enables Dependabot vulnerability

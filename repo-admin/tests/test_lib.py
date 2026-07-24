@@ -12,6 +12,7 @@ from lib import (
     Status,
     api_json,
     api_request,
+    classify_status,
     error_message,
     fetch_repos_json,
     filter_repos,
@@ -143,6 +144,22 @@ def test_result_line_does_not_prefix_changed_statuses(status):
     assert result_line("repo", "detail", status) == f"{'repo':<30} detail"
 
 
+def test_classify_status_at_target_and_changed_is_ok():
+    assert classify_status(at_target=True, changed=True) == Status.OK
+
+
+def test_classify_status_at_target_and_unchanged_is_unchanged():
+    assert classify_status(at_target=True, changed=False) == Status.UNCHANGED
+
+
+def test_classify_status_not_at_target_and_changed_is_limited():
+    assert classify_status(at_target=False, changed=True) == Status.LIMITED
+
+
+def test_classify_status_not_at_target_and_unchanged_is_limited_unchanged():
+    assert classify_status(at_target=False, changed=False) == Status.LIMITED_UNCHANGED
+
+
 def test_status_display_pairs_are_unique_per_status():
     # (symbol, color) pairs -- not symbols alone, since e.g. UNCHANGED and
     # LIMITED_UNCHANGED intentionally share the "•" symbol and differ only
@@ -155,13 +172,6 @@ def test_print_status_does_not_interpret_brackets_in_line_as_markup(capsys):
     print_status(Status.OK, "repo {'allow_auto_merge': True} -> [oops]")
     out = capsys.readouterr().out
     assert "{'allow_auto_merge': True} -> [oops]" in out
-
-
-def test_print_status_writes_to_stderr_when_requested(capsys):
-    print_status(Status.FAILED, "bad-repo: boom", stderr=True)
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert "bad-repo: boom" in captured.err
 
 
 def test_run_parallel_returns_worker_results_for_every_repo():
@@ -235,7 +245,7 @@ def test_run_parallel_reports_failed_repo_names_in_error(capsys):
 
     with pytest.raises(GhError, match="bad-repo"):
         run_parallel(repos, worker, jobs=1)
-    assert "bad-repo" in capsys.readouterr().err
+    assert "bad-repo" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
