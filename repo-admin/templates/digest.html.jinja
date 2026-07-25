@@ -55,11 +55,11 @@ td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid #ddd; font
 {% else %}
 <table>
 <tr>
-  <th>Release</th><th>Repo</th><th>Published</th><th>Type</th>
+  <th>Release</th><th>Published</th><th>Type</th>
 </tr>
 {% for release in releases %}
 <tr>
-  <td><a href="{{ release.url }}">{{ release.repo }} {{release.tag_name}}</a></td>
+  <td><a href="{{ release.url }}">{{ release.repo }} {{ release.tag_name }}</a></td>
   <td>{{ release.published_at.strftime("%Y-%m-%d") }}</td>
   <td class="{{ "release-prerelease" if release.prerelease else "release-stable" }}">{{ "prerelease" if release.prerelease else "release" }}</td>
 </tr>

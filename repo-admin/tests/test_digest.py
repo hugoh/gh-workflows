@@ -660,8 +660,7 @@ def test_render_html_lists_release_with_relevant_info():
     html = render_html(
         [], [_normalized_release()], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL
     )
-    assert "Version 1.0.0" in html
-    assert "repo-a" in html
+    assert "repo-a v1.0.0" in html
     assert "2026-07-20" in html
     assert "https://github.com/hugoh/repo-a/releases/tag/v1.0.0" in html
 
@@ -670,7 +669,7 @@ def test_render_html_release_outside_window_is_excluded():
     release = _normalized_release(published_at=datetime(2026, 7, 1, tzinfo=UTC))
     html = render_html([], [release], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
     assert "no releases" in html.lower()
-    assert "Version 1.0.0" not in html
+    assert "repo-a v1.0.0" not in html
 
 
 def test_render_html_empty_state_for_no_releases():
@@ -686,15 +685,19 @@ def test_render_html_marks_prerelease():
 
 def test_render_html_releases_sorted_newest_first():
     older = _normalized_release(
-        tag_name="v1.0.0", name="Older", published_at=datetime(2026, 7, 18, tzinfo=UTC)
+        tag_name="v1.0.0",
+        url="https://github.com/hugoh/repo-a/releases/tag/v1.0.0",
+        published_at=datetime(2026, 7, 18, tzinfo=UTC),
     )
     newer = _normalized_release(
-        tag_name="v2.0.0", name="Newer", published_at=datetime(2026, 7, 22, tzinfo=UTC)
+        tag_name="v2.0.0",
+        url="https://github.com/hugoh/repo-a/releases/tag/v2.0.0",
+        published_at=datetime(2026, 7, 22, tzinfo=UTC),
     )
     html = render_html(
         [], [older, newer], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL
     )
-    assert html.index("Newer") < html.index("Older")
+    assert html.index("repo-a v2.0.0") < html.index("repo-a v1.0.0")
 
 
 def test_render_html_release_section_header_shows_its_own_window():
@@ -702,8 +705,8 @@ def test_render_html_release_section_header_shows_its_own_window():
     assert "2026-07-17" in html  # since_release
 
 
-def test_render_html_escapes_release_name():
-    release = _normalized_release(name="<script>alert(1)</script>")
+def test_render_html_escapes_release_tag_name():
+    release = _normalized_release(tag_name="<script>alert(1)</script>")
     html = render_html([], [release], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;" in html

@@ -19,6 +19,7 @@ import concurrent.futures
 import os
 import smtplib
 import sys
+import threading
 from datetime import UTC, datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -35,7 +36,7 @@ from lib import (
     error_message,
     list_repos,
 )
-from rich.progress import Progress
+from rich.progress import Progress, TaskID
 
 _PER_PAGE = "100"
 _FAILING_CONCLUSIONS = {"failure", "timed_out", "cancelled", "action_required"}
@@ -101,13 +102,45 @@ def _mergeable_status(owner: str, name: str, number: int) -> str:
     return "conflict" if data.get("mergeable_state") == "dirty" else "clean"
 
 
-def _fetch_repo_prs(owner: str, name: str, since_updated: datetime) -> list[dict]:
+class _GrowingTotal:
+    """A thread-safe counter for a Progress task's `total` that grows by one
+    each time a unit of work is discovered -- avoids `total=None`'s
+    indeterminate/pulsing bar, which never renders a finished 100% state.
+    Incrementing `total` right before the matching `progress.advance()` call
+    keeps total and completed in lockstep, so the bar naturally reaches
+    100% once the last unit finishes.
+    """
+
+    def __init__(self, progress: Progress, task: TaskID) -> None:
+        self._progress = progress
+        self._task = task
+        self._lock = threading.Lock()
+        self._total = 0
+
+    def grow(self) -> None:
+        with self._lock:
+            self._total += 1
+            self._progress.update(self._task, total=self._total)
+
+
+def _fetch_repo_prs(
+    owner: str,
+    name: str,
+    since_updated: datetime,
+    progress: Progress,
+    task: TaskID,
+    check_total: _GrowingTotal,
+) -> list[dict]:
     """Pages a repo's pull requests newest-updated-first, stopping as soon as
     a page's PRs were all last updated before `since_updated` -- no need to
     walk full history every run. Sorted by `updated` rather than `created` so
     a PR opened long before the fetch window but closed within it (closing
     bumps `updated_at`) is still picked up; render_html does the actual
     open/closed windowing.
+
+    Advances `task` after every open PR's CI/mergeable checks -- those are
+    the slow per-PR API calls, so a repo with many open PRs would otherwise
+    leave the bar looking stalled until the whole repo finishes.
     """
     prs = []
     page = 1
@@ -136,8 +169,10 @@ def _fetch_repo_prs(owner: str, name: str, since_updated: datetime) -> list[dict
                 break
             pr = _normalize_pr(name, item)
             if pr["state"] == "open":
+                check_total.grow()
                 pr["ci_status"] = _ci_status(owner, name, item["head"]["sha"])
                 pr["mergeable"] = _mergeable_status(owner, name, pr["number"])
+                progress.advance(task)
             prs.append(pr)
 
         if page_exhausted or len(items) < int(_PER_PAGE):
@@ -153,20 +188,34 @@ def fetch_prs(
     (one repo's fetch doesn't depend on another's), and with dozens of repos
     doing them serially dominates the script's runtime. lib.py's requests
     Session is thread-local specifically to support this.
+
+    Two bars: repos fetched (as before), plus a growing counter of open PRs
+    CI/mergeable-checked -- those per-PR calls are the slow part, so a repo
+    with many open PRs no longer looks stalled until it finishes.
     """
     prs = []
     with (
         concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool,
         Progress(disable=not sys.stdout.isatty()) as progress,
     ):
-        task = progress.add_task("Fetching PRs...", total=len(repos))
+        repo_task = progress.add_task("Fetching PRs...", total=len(repos))
+        check_task = progress.add_task("Checking open PR status...", total=0)
+        check_total = _GrowingTotal(progress, check_task)
         futures = [
-            pool.submit(_fetch_repo_prs, owner, repo.name, since_updated)
+            pool.submit(
+                _fetch_repo_prs,
+                owner,
+                repo.name,
+                since_updated,
+                progress,
+                check_task,
+                check_total,
+            )
             for repo in repos
         ]
         for future in concurrent.futures.as_completed(futures):
             prs.extend(future.result())
-            progress.advance(task)
+            progress.advance(repo_task)
     return prs
 
 
@@ -356,8 +405,11 @@ def main(argv: list[str]) -> int:
     since_fetch = min(since_open, since_closed, since_release)
 
     repos = list_repos(DEFAULT_OWNER)
-    prs = fetch_prs(DEFAULT_OWNER, repos, since_fetch)
-    releases = fetch_releases(DEFAULT_OWNER, repos, since_fetch)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        prs_future = pool.submit(fetch_prs, DEFAULT_OWNER, repos, since_fetch)
+        releases_future = pool.submit(fetch_releases, DEFAULT_OWNER, repos, since_fetch)
+        prs = prs_future.result()
+        releases = releases_future.result()
     rendered = render_html(
         prs, releases, since_open, since_closed, since_release, until
     )
