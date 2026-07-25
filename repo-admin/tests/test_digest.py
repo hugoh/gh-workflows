@@ -4,13 +4,14 @@ from typing import ClassVar
 
 import pytest
 import responses
-from digest import fetch_prs, render_html, send_email
+from digest import fetch_prs, fetch_releases, render_html, send_email
 from lib import API_BASE, Repo
 
 # open PRs cover the last 14 days, closed PRs the last 7 -- both windows
 # meet at UNTIL (2026-07-24).
 SINCE_OPEN = datetime(2026, 7, 10, tzinfo=UTC)
 SINCE_CLOSED = datetime(2026, 7, 17, tzinfo=UTC)
+SINCE_RELEASE = datetime(2026, 7, 17, tzinfo=UTC)
 UNTIL = datetime(2026, 7, 24, tzinfo=UTC)
 
 REPO_A = Repo(name="repo-a", default_branch="main", is_private=False, is_fork=False)
@@ -212,6 +213,130 @@ def test_fetch_prs_combines_multiple_repos():
 
 
 # ---------------------------------------------------------------------------
+# fetch_releases
+# ---------------------------------------------------------------------------
+
+
+def _release(
+    tag_name="v1.0.0",
+    name="Version 1.0.0",
+    published_at="2026-07-20T10:00:00Z",
+    draft=False,
+    prerelease=False,
+):
+    return {
+        "tag_name": tag_name,
+        "name": name,
+        "html_url": f"https://github.com/hugoh/repo-a/releases/tag/{tag_name}",
+        "published_at": published_at,
+        "draft": draft,
+        "prerelease": prerelease,
+    }
+
+
+@responses.activate
+def test_fetch_releases_normalizes_fields():
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/repos/hugoh/repo-a/releases",
+        json=[_release(tag_name="v2.0.0", name="Version 2.0.0")],
+        status=200,
+    )
+    releases = fetch_releases("hugoh", [REPO_A], SINCE_RELEASE)
+    assert releases == [
+        {
+            "repo": "repo-a",
+            "tag_name": "v2.0.0",
+            "name": "Version 2.0.0",
+            "url": "https://github.com/hugoh/repo-a/releases/tag/v2.0.0",
+            "published_at": datetime(2026, 7, 20, 10, 0, 0, tzinfo=UTC),
+            "prerelease": False,
+        }
+    ]
+
+
+@responses.activate
+def test_fetch_releases_falls_back_to_tag_name_when_name_blank():
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/repos/hugoh/repo-a/releases",
+        json=[_release(tag_name="v2.0.0", name="")],
+        status=200,
+    )
+    releases = fetch_releases("hugoh", [REPO_A], SINCE_RELEASE)
+    assert releases[0]["name"] == "v2.0.0"
+
+
+@responses.activate
+def test_fetch_releases_excludes_drafts():
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/repos/hugoh/repo-a/releases",
+        json=[_release(draft=True, published_at=None)],
+        status=200,
+    )
+    releases = fetch_releases("hugoh", [REPO_A], SINCE_RELEASE)
+    assert releases == []
+
+
+@responses.activate
+def test_fetch_releases_marks_prerelease():
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/repos/hugoh/repo-a/releases",
+        json=[_release(prerelease=True)],
+        status=200,
+    )
+    releases = fetch_releases("hugoh", [REPO_A], SINCE_RELEASE)
+    assert releases[0]["prerelease"] is True
+
+
+@responses.activate
+def test_fetch_releases_excludes_releases_published_before_since():
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/repos/hugoh/repo-a/releases",
+        json=[
+            _release(tag_name="v2.0.0", published_at="2026-07-20T10:00:00Z"),
+            _release(tag_name="v1.0.0", published_at="2026-07-01T10:00:00Z"),
+        ],
+        status=200,
+    )
+    releases = fetch_releases("hugoh", [REPO_A], SINCE_RELEASE)
+    assert [r["tag_name"] for r in releases] == ["v2.0.0"]
+
+
+@responses.activate
+def test_fetch_releases_stops_paginating_once_page_is_entirely_older_than_since():
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/repos/hugoh/repo-a/releases",
+        json=[_release(published_at="2026-07-01T10:00:00Z")],
+        status=200,
+    )
+    fetch_releases("hugoh", [REPO_A], SINCE_RELEASE)
+    assert len(responses.calls) == 1
+
+
+@responses.activate
+def test_fetch_releases_combines_multiple_repos():
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/repos/hugoh/repo-a/releases",
+        json=[_release(tag_name="v1.0.0")],
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/repos/hugoh/repo-b/releases",
+        json=[_release(tag_name="v2.0.0")],
+        status=200,
+    )
+    releases = fetch_releases("hugoh", [REPO_A, REPO_B], SINCE_RELEASE)
+    assert sorted(r["tag_name"] for r in releases) == ["v1.0.0", "v2.0.0"]
+
+
+# ---------------------------------------------------------------------------
 # CI status / mergeable state (open PRs only -- closed PRs skip these two
 # extra fetches, since a closed PR's CI/conflict state isn't actionable)
 # ---------------------------------------------------------------------------
@@ -314,7 +439,9 @@ def _normalized_pr(**overrides):
 
 
 def test_render_html_lists_open_pr_with_relevant_info():
-    html = render_html([_normalized_pr()], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    html = render_html(
+        [_normalized_pr()], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL
+    )
     assert "Add feature" in html
     assert "repo-a" in html
     assert "#1" in html
@@ -332,7 +459,9 @@ def test_render_html_splits_open_and_closed_sections():
         merged=True,
         closed_at=datetime(2026, 7, 21, tzinfo=UTC),
     )
-    html = render_html([open_pr, closed_pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    html = render_html(
+        [open_pr, closed_pr], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL
+    )
     open_idx = html.index("Open one")
     closed_idx = html.index("Closed one")
     open_section_idx = html.index("Open")
@@ -340,12 +469,27 @@ def test_render_html_splits_open_and_closed_sections():
     assert open_section_idx < open_idx < closed_section_idx < closed_idx
 
 
+def test_render_html_orders_sections_open_releases_closed():
+    open_pr = _normalized_pr(state="open")
+    closed_pr = _normalized_pr(
+        state="closed", merged=True, closed_at=datetime(2026, 7, 21, tzinfo=UTC)
+    )
+    release = _normalized_release()
+    html = render_html(
+        [open_pr, closed_pr], [release], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL
+    )
+    open_idx = html.index("Open (")
+    releases_idx = html.index("Releases (")
+    closed_idx = html.index("Closed (")
+    assert open_idx < releases_idx < closed_idx
+
+
 def test_render_html_open_pr_outside_open_window_is_excluded():
     # created 20 days before UNTIL -- inside the (implied) 30-day closed
     # window used here isn't relevant since it's still open; it's outside
     # the 14-day open window (SINCE_OPEN is 2026-07-10).
     pr = _normalized_pr(created_at=datetime(2026, 7, 1, tzinfo=UTC), state="open")
-    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    html = render_html([pr], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
     assert "no open" in html.lower()
 
 
@@ -358,7 +502,7 @@ def test_render_html_closed_pr_outside_closed_window_is_excluded():
         created_at=datetime(2026, 7, 12, tzinfo=UTC),
         closed_at=datetime(2026, 7, 13, tzinfo=UTC),
     )
-    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    html = render_html([pr], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
     assert "no closed" in html.lower()
     assert "Add feature" not in html
 
@@ -372,7 +516,7 @@ def test_render_html_closed_pr_opened_before_open_window_still_shown():
         created_at=datetime(2026, 6, 1, tzinfo=UTC),
         closed_at=datetime(2026, 7, 20, tzinfo=UTC),
     )
-    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    html = render_html([pr], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
     assert "Add feature" in html
 
 
@@ -380,7 +524,7 @@ def test_render_html_shows_merged_status_for_merged_pr():
     pr = _normalized_pr(
         state="closed", merged=True, closed_at=datetime(2026, 7, 21, tzinfo=UTC)
     )
-    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    html = render_html([pr], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
     assert "merged" in html.lower()
 
 
@@ -390,7 +534,7 @@ def test_render_html_shows_closed_without_merge():
         merged=False,
         closed_at=datetime(2026, 7, 21, tzinfo=UTC),
     )
-    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    html = render_html([pr], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
     assert "closed" in html.lower()
     assert "merged" not in html.lower()
 
@@ -399,17 +543,19 @@ def test_render_html_empty_state_for_no_open_prs():
     closed_pr = _normalized_pr(
         state="closed", merged=True, closed_at=datetime(2026, 7, 21, tzinfo=UTC)
     )
-    html = render_html([closed_pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    html = render_html([closed_pr], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
     assert "no open" in html.lower()
 
 
 def test_render_html_empty_state_for_no_closed_prs():
-    html = render_html([_normalized_pr()], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    html = render_html(
+        [_normalized_pr()], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL
+    )
     assert "no closed" in html.lower()
 
 
 def test_render_html_section_headers_show_each_windows_own_date_range():
-    html = render_html([], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    html = render_html([], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
     assert "2026-07-10" in html  # since_open
     assert "2026-07-17" in html  # since_closed
     assert "2026-07-24" in html  # until, shared
@@ -417,44 +563,44 @@ def test_render_html_section_headers_show_each_windows_own_date_range():
 
 def test_render_html_shows_ci_status_and_mergeable_for_open_prs():
     pr = _normalized_pr(ci_status="failing", mergeable="conflict")
-    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    html = render_html([pr], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
     assert "failing" in html
     assert "conflict" in html
 
 
 def test_render_html_color_codes_passing_ci_status():
     pr = _normalized_pr(ci_status="passing")
-    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    html = render_html([pr], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
     assert "status-passing" in html
 
 
 def test_render_html_color_codes_failing_ci_status():
     pr = _normalized_pr(ci_status="failing")
-    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    html = render_html([pr], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
     assert "status-failing" in html
 
 
 def test_render_html_color_codes_pending_ci_status():
     pr = _normalized_pr(ci_status="pending")
-    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    html = render_html([pr], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
     assert "status-pending" in html
 
 
 def test_render_html_color_codes_no_checks_ci_status():
     pr = _normalized_pr(ci_status="no checks")
-    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    html = render_html([pr], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
     assert "status-no-checks" in html
 
 
 def test_render_html_color_codes_clean_mergeable():
     pr = _normalized_pr(mergeable="clean")
-    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    html = render_html([pr], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
     assert "mergeable-clean" in html
 
 
 def test_render_html_color_codes_conflict_mergeable():
     pr = _normalized_pr(mergeable="conflict")
-    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    html = render_html([pr], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
     assert "mergeable-conflict" in html
 
 
@@ -462,7 +608,7 @@ def test_render_html_closed_section_has_no_ci_or_mergeable_columns():
     pr = _normalized_pr(
         state="closed", merged=True, closed_at=datetime(2026, 7, 21, tzinfo=UTC)
     )
-    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    html = render_html([pr], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
     closed_section = html[html.index("Closed (") :]
     assert "status-" not in closed_section
     assert "mergeable-" not in closed_section
@@ -470,7 +616,98 @@ def test_render_html_closed_section_has_no_ci_or_mergeable_columns():
 
 def test_render_html_escapes_title():
     pr = _normalized_pr(title="<script>alert(1)</script>")
-    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    html = render_html([pr], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_render_html_shows_counts_in_section_headers():
+    open_pr = _normalized_pr(number=1, state="open")
+    closed_pr = _normalized_pr(
+        number=2,
+        state="closed",
+        merged=True,
+        closed_at=datetime(2026, 7, 21, tzinfo=UTC),
+    )
+    releases = [_normalized_release(), _normalized_release(tag_name="v2.0.0")]
+    html = render_html(
+        [open_pr, closed_pr], releases, SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL
+    )
+    assert "Open (1)" in html
+    assert "Releases (2)" in html
+    assert "Closed (1)" in html
+
+
+# ---------------------------------------------------------------------------
+# releases (render_html)
+# ---------------------------------------------------------------------------
+
+
+def _normalized_release(**overrides):
+    base = {
+        "repo": "repo-a",
+        "tag_name": "v1.0.0",
+        "name": "Version 1.0.0",
+        "url": "https://github.com/hugoh/repo-a/releases/tag/v1.0.0",
+        "published_at": datetime(2026, 7, 20, tzinfo=UTC),
+        "prerelease": False,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_render_html_lists_release_with_relevant_info():
+    html = render_html(
+        [], [_normalized_release()], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL
+    )
+    assert "repo-a v1.0.0" in html
+    assert "2026-07-20" in html
+    assert "https://github.com/hugoh/repo-a/releases/tag/v1.0.0" in html
+
+
+def test_render_html_release_outside_window_is_excluded():
+    release = _normalized_release(published_at=datetime(2026, 7, 1, tzinfo=UTC))
+    html = render_html([], [release], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
+    assert "no releases" in html.lower()
+    assert "repo-a v1.0.0" not in html
+
+
+def test_render_html_empty_state_for_no_releases():
+    html = render_html([], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
+    assert "no releases" in html.lower()
+
+
+def test_render_html_marks_prerelease():
+    release = _normalized_release(prerelease=True)
+    html = render_html([], [release], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
+    assert "prerelease" in html.lower()
+
+
+def test_render_html_releases_sorted_newest_first():
+    older = _normalized_release(
+        tag_name="v1.0.0",
+        url="https://github.com/hugoh/repo-a/releases/tag/v1.0.0",
+        published_at=datetime(2026, 7, 18, tzinfo=UTC),
+    )
+    newer = _normalized_release(
+        tag_name="v2.0.0",
+        url="https://github.com/hugoh/repo-a/releases/tag/v2.0.0",
+        published_at=datetime(2026, 7, 22, tzinfo=UTC),
+    )
+    html = render_html(
+        [], [older, newer], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL
+    )
+    assert html.index("repo-a v2.0.0") < html.index("repo-a v1.0.0")
+
+
+def test_render_html_release_section_header_shows_its_own_window():
+    html = render_html([], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
+    assert "2026-07-17" in html  # since_release
+
+
+def test_render_html_escapes_release_tag_name():
+    release = _normalized_release(tag_name="<script>alert(1)</script>")
+    html = render_html([], [release], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;" in html
 

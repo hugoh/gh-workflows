@@ -1,8 +1,10 @@
-"""Builds an HTML digest of pull requests against hugoh's repos -- still-open
-PRs opened in the last N days, and PRs closed in the last M days -- in
-separate sections, and emails it via an smtp2go SMTP relay.
+"""Builds an HTML digest of activity on hugoh's repos -- still-open PRs
+opened in the last N days, releases published in the last R days, and PRs
+closed in the last M days -- in separate sections, and emails it via an
+smtp2go SMTP relay.
 
-Usage: digest.py [--open-days 14] [--closed-days 7] [--out FILE] [--no-send]
+Usage: digest.py [--open-days 14] [--release-days 7] [--closed-days 7]
+    [--out FILE] [--no-send]
 
 Reads SMTP settings and the recipient from the environment: SMTP_HOST,
 SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, DIGEST_FROM_EMAIL,
@@ -17,6 +19,7 @@ import concurrent.futures
 import os
 import smtplib
 import sys
+import threading
 from datetime import UTC, datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -33,7 +36,7 @@ from lib import (
     error_message,
     list_repos,
 )
-from rich.progress import Progress
+from rich.progress import Progress, TaskID
 
 _PER_PAGE = "100"
 _FAILING_CONCLUSIONS = {"failure", "timed_out", "cancelled", "action_required"}
@@ -58,6 +61,17 @@ def _normalize_pr(repo_name: str, item: dict) -> dict:
         "closed_at": _parse_optional_dt(item["closed_at"]),
         "merged": item["merged_at"] is not None,
         "state": item["state"],
+    }
+
+
+def _normalize_release(repo_name: str, item: dict) -> dict:
+    return {
+        "repo": repo_name,
+        "tag_name": item["tag_name"],
+        "name": item["name"] or item["tag_name"],
+        "url": item["html_url"],
+        "published_at": _parse_dt(item["published_at"]),
+        "prerelease": item["prerelease"],
     }
 
 
@@ -88,13 +102,45 @@ def _mergeable_status(owner: str, name: str, number: int) -> str:
     return "conflict" if data.get("mergeable_state") == "dirty" else "clean"
 
 
-def _fetch_repo_prs(owner: str, name: str, since_updated: datetime) -> list[dict]:
+class _GrowingTotal:
+    """A thread-safe counter for a Progress task's `total` that grows by one
+    each time a unit of work is discovered -- avoids `total=None`'s
+    indeterminate/pulsing bar, which never renders a finished 100% state.
+    Incrementing `total` right before the matching `progress.advance()` call
+    keeps total and completed in lockstep, so the bar naturally reaches
+    100% once the last unit finishes.
+    """
+
+    def __init__(self, progress: Progress, task: TaskID) -> None:
+        self._progress = progress
+        self._task = task
+        self._lock = threading.Lock()
+        self._total = 0
+
+    def grow(self) -> None:
+        with self._lock:
+            self._total += 1
+            self._progress.update(self._task, total=self._total)
+
+
+def _fetch_repo_prs(
+    owner: str,
+    name: str,
+    since_updated: datetime,
+    progress: Progress,
+    task: TaskID,
+    check_total: _GrowingTotal,
+) -> list[dict]:
     """Pages a repo's pull requests newest-updated-first, stopping as soon as
     a page's PRs were all last updated before `since_updated` -- no need to
     walk full history every run. Sorted by `updated` rather than `created` so
     a PR opened long before the fetch window but closed within it (closing
     bumps `updated_at`) is still picked up; render_html does the actual
     open/closed windowing.
+
+    Advances `task` after every open PR's CI/mergeable checks -- those are
+    the slow per-PR API calls, so a repo with many open PRs would otherwise
+    leave the bar looking stalled until the whole repo finishes.
     """
     prs = []
     page = 1
@@ -123,8 +169,10 @@ def _fetch_repo_prs(owner: str, name: str, since_updated: datetime) -> list[dict
                 break
             pr = _normalize_pr(name, item)
             if pr["state"] == "open":
+                check_total.grow()
                 pr["ci_status"] = _ci_status(owner, name, item["head"]["sha"])
                 pr["mergeable"] = _mergeable_status(owner, name, pr["number"])
+                progress.advance(task)
             prs.append(pr)
 
         if page_exhausted or len(items) < int(_PER_PAGE):
@@ -140,21 +188,92 @@ def fetch_prs(
     (one repo's fetch doesn't depend on another's), and with dozens of repos
     doing them serially dominates the script's runtime. lib.py's requests
     Session is thread-local specifically to support this.
+
+    Two bars: repos fetched (as before), plus a growing counter of open PRs
+    CI/mergeable-checked -- those per-PR calls are the slow part, so a repo
+    with many open PRs no longer looks stalled until it finishes.
     """
     prs = []
     with (
         concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool,
         Progress(disable=not sys.stdout.isatty()) as progress,
     ):
-        task = progress.add_task("Fetching PRs...", total=len(repos))
+        repo_task = progress.add_task("Fetching PRs...", total=len(repos))
+        check_task = progress.add_task("Checking open PR status...", total=0)
+        check_total = _GrowingTotal(progress, check_task)
         futures = [
-            pool.submit(_fetch_repo_prs, owner, repo.name, since_updated)
+            pool.submit(
+                _fetch_repo_prs,
+                owner,
+                repo.name,
+                since_updated,
+                progress,
+                check_task,
+                check_total,
+            )
             for repo in repos
         ]
         for future in concurrent.futures.as_completed(futures):
             prs.extend(future.result())
-            progress.advance(task)
+            progress.advance(repo_task)
     return prs
+
+
+def _fetch_repo_releases(
+    owner: str, name: str, since_published: datetime
+) -> list[dict]:
+    """Pages a repo's releases newest-first (GitHub's default order), stopping
+    as soon as a page's releases were all published before `since_published`.
+    Draft releases have no `published_at` and aren't a publish event, so
+    they're skipped rather than breaking the cutoff comparison.
+    """
+    releases = []
+    page = 1
+    while True:
+        response = api_request(
+            "GET",
+            f"/repos/{owner}/{name}/releases",
+            params={"per_page": _PER_PAGE, "page": str(page)},
+        )
+        if not response.ok:
+            raise GhError(error_message(response), status_code=response.status_code)
+        items = response.json()
+        if not items:
+            break
+
+        page_exhausted = False
+        for item in items:
+            if item["draft"]:
+                continue
+            if _parse_dt(item["published_at"]) < since_published:
+                page_exhausted = True
+                break
+            releases.append(_normalize_release(name, item))
+
+        if page_exhausted or len(items) < int(_PER_PAGE):
+            break
+        page += 1
+    return releases
+
+
+def fetch_releases(
+    owner: str, repos: list[Repo], since_published: datetime, jobs: int = DEFAULT_JOBS
+) -> list[dict]:
+    """Fetches every repo's releases concurrently, mirroring fetch_prs."""
+    releases = []
+    with (
+        concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool,
+        Progress(disable=not sys.stdout.isatty()) as progress,
+    ):
+        task = progress.add_task("Fetching releases...", total=len(repos))
+        futures = [
+            pool.submit(_fetch_repo_releases, owner, repo.name, since_published)
+            for repo in repos
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            releases.extend(future.result())
+            progress.advance(task)
+    return releases
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +295,12 @@ def _format_date(dt: datetime) -> str:
 
 
 def render_html(
-    prs: list[dict], since_open: datetime, since_closed: datetime, until: datetime
+    prs: list[dict],
+    releases: list[dict],
+    since_open: datetime,
+    since_closed: datetime,
+    since_release: datetime,
+    until: datetime,
 ) -> str:
     open_prs = sorted(
         (pr for pr in prs if pr["state"] == "open" and pr["created_at"] >= since_open),
@@ -194,11 +318,18 @@ def render_html(
         key=lambda pr: pr["closed_at"],
         reverse=True,
     )
+    recent_releases = sorted(
+        (r for r in releases if r["published_at"] >= since_release),
+        key=lambda r: r["published_at"],
+        reverse=True,
+    )
     return _digest_template.render(
         open_prs=open_prs,
+        releases=recent_releases,
         closed_prs=closed_prs,
         since_open=since_open,
         since_closed=since_closed,
+        since_release=since_release,
         until=until,
     )
 
@@ -251,6 +382,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=7,
         help="how many days back to look for closed PRs (default 7)",
     )
+    parser.add_argument(
+        "--release-days",
+        type=int,
+        default=7,
+        help="how many days back to look for published releases (default 7)",
+    )
     parser.add_argument("--out", help="write the rendered HTML to this file")
     parser.add_argument(
         "--no-send", action="store_true", help="skip sending the email (for dry runs)"
@@ -264,11 +401,18 @@ def main(argv: list[str]) -> int:
     until = datetime.now(UTC)
     since_open = until - timedelta(days=args.open_days)
     since_closed = until - timedelta(days=args.closed_days)
-    since_fetch = min(since_open, since_closed)
+    since_release = until - timedelta(days=args.release_days)
+    since_fetch = min(since_open, since_closed, since_release)
 
     repos = list_repos(DEFAULT_OWNER)
-    prs = fetch_prs(DEFAULT_OWNER, repos, since_fetch)
-    rendered = render_html(prs, since_open, since_closed, until)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        prs_future = pool.submit(fetch_prs, DEFAULT_OWNER, repos, since_fetch)
+        releases_future = pool.submit(fetch_releases, DEFAULT_OWNER, repos, since_fetch)
+        prs = prs_future.result()
+        releases = releases_future.result()
+    rendered = render_html(
+        prs, releases, since_open, since_closed, since_release, until
+    )
 
     if args.out:
         with open(args.out, "w") as f:
