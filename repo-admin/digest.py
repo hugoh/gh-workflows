@@ -13,14 +13,15 @@ repo_admin.py.
 from __future__ import annotations
 
 import argparse
-import html
 import os
 import smtplib
 import sys
 from datetime import UTC, datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from pathlib import Path
 
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 from lib import DEFAULT_OWNER, GhError, Repo, api_request, error_message, list_repos
 
 _PER_PAGE = "100"
@@ -100,48 +101,18 @@ def fetch_prs(owner: str, repos: list[Repo], since_updated: datetime) -> list[di
 # render_html
 # ---------------------------------------------------------------------------
 
-_STYLE = """
-body { font-family: -apple-system, Helvetica, Arial, sans-serif; color: #1a1a1a; }
-h1 { font-size: 1.2em; }
-h2 { font-size: 1.05em; margin-top: 1.5em; }
-table { border-collapse: collapse; width: 100%; }
-td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid #ddd; font-size: 0.9em; }
-.empty { color: #666; font-style: italic; }
-"""
+_TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+_jinja_env = Environment(
+    loader=FileSystemLoader(_TEMPLATES_DIR),
+    autoescape=select_autoescape(["html", "jinja"]),
+    trim_blocks=True,
+    lstrip_blocks=True,
+)
+_digest_template = _jinja_env.get_template("digest.html.jinja")
 
 
 def _format_date(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d")
-
-
-def _pr_row(pr: dict, *, closed: bool) -> str:
-    title = html.escape(pr["title"])
-    author = html.escape(pr["author"])
-    repo = html.escape(pr["repo"])
-    cells = [
-        f'<td><a href="{html.escape(pr["url"])}">{title}</a></td>',
-        f"<td>{repo}</td>",
-        f"<td>#{pr['number']}</td>",
-        f"<td>{author}</td>",
-        f"<td>{_format_date(pr['created_at'])}</td>",
-    ]
-    if closed:
-        status = "merged" if pr["merged"] else "closed"
-        cells.append(f"<td>{status} {_format_date(pr['closed_at'])}</td>")
-    return "<tr>" + "".join(cells) + "</tr>"
-
-
-def _section(
-    title: str, since: datetime, until: datetime, prs: list[dict], *, closed: bool
-) -> str:
-    heading = f"<h2>{title} ({_format_date(since)} to {_format_date(until)})</h2>"
-    if not prs:
-        return f"{heading}<p class='empty'>No {title.lower()} PRs in this period.</p>"
-    header = "<th>Title</th><th>Repo</th><th>#</th><th>Author</th><th>Opened</th>"
-    if closed:
-        header += "<th>Status</th>"
-    rows = "".join(_pr_row(pr, closed=closed) for pr in prs)
-    return f"{heading}<table><tr>{header}</tr>{rows}</table>"
 
 
 def render_html(
@@ -163,13 +134,12 @@ def render_html(
         key=lambda pr: pr["closed_at"],
         reverse=True,
     )
-    return (
-        "<html><head><meta charset='utf-8'>"
-        f"<style>{_STYLE}</style></head><body>"
-        "<h1>PR digest</h1>"
-        f"{_section('Open', since_open, until, open_prs, closed=False)}"
-        f"{_section('Closed', since_closed, until, closed_prs, closed=True)}"
-        "</body></html>"
+    return _digest_template.render(
+        open_prs=open_prs,
+        closed_prs=closed_prs,
+        since_open=since_open,
+        since_closed=since_closed,
+        until=until,
     )
 
 

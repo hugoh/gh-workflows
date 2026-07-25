@@ -1,0 +1,43 @@
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+body { font-family: -apple-system, Helvetica, Arial, sans-serif; color: #1a1a1a; }
+h1 { font-size: 1.2em; }
+h2 { font-size: 1.05em; margin-top: 1.5em; }
+table { border-collapse: collapse; width: 100%; }
+td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid #ddd; font-size: 0.9em; }
+.empty { color: #666; font-style: italic; }
+</style>
+</head>
+<body>
+<h1>PR digest</h1>
+{% macro section(title, since, until, prs, closed) %}
+<h2>{{ title }} ({{ since.strftime("%Y-%m-%d") }} to {{ until.strftime("%Y-%m-%d") }})</h2>
+{% if not prs %}
+<p class="empty">No {{ title.lower() }} PRs in this period.</p>
+{% else %}
+<table>
+<tr>
+  <th>Title</th><th>Repo</th><th>#</th><th>Author</th><th>Opened</th>
+  {% if closed %}<th>Status</th>{% endif %}
+</tr>
+{% for pr in prs %}
+<tr>
+  <td><a href="{{ pr.url }}">{{ pr.title }}</a></td>
+  <td>{{ pr.repo }}</td>
+  <td>#{{ pr.number }}</td>
+  <td>{{ pr.author }}</td>
+  <td>{{ pr.created_at.strftime("%Y-%m-%d") }}</td>
+  {% if closed %}
+  <td>{{ "merged" if pr.merged else "closed" }} {{ pr.closed_at.strftime("%Y-%m-%d") }}</td>
+  {% endif %}
+</tr>
+{% endfor %}
+</table>
+{% endif %}
+{% endmacro %}
+{{ section("Open", since_open, until, open_prs, false) }}
+{{ section("Closed", since_closed, until, closed_prs, true) }}
+</body>
+</html>
