@@ -144,7 +144,7 @@ def fetch_prs(
     prs = []
     with (
         concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool,
-        Progress() as progress,
+        Progress(disable=not sys.stdout.isatty()) as progress,
     ):
         task = progress.add_task("Fetching PRs...", total=len(repos))
         futures = [
