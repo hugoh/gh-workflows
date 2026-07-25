@@ -37,7 +37,33 @@ def _pr(
         "closed_at": closed_at,
         "merged_at": merged_at,
         "state": state,
+        "head": {"sha": f"sha{number}"},
     }
+
+
+def _mock_open_pr_extras(
+    repo="repo-a", number=1, sha=None, check_runs=None, mergeable_state="clean"
+):
+    """Open PRs get two extra fetches (CI status, mergeable state) that
+    closed PRs skip -- mock both for a given repo/PR/sha.
+    """
+    sha = sha or f"sha{number}"
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/repos/hugoh/{repo}/commits/{sha}/check-runs",
+        json={"check_runs": check_runs if check_runs is not None else [_check_run()]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/repos/hugoh/{repo}/pulls/{number}",
+        json={"mergeable_state": mergeable_state},
+        status=200,
+    )
+
+
+def _check_run(status="completed", conclusion="success"):
+    return {"status": status, "conclusion": conclusion}
 
 
 @pytest.fixture(autouse=True)
@@ -64,6 +90,7 @@ def test_fetch_prs_normalizes_fields():
         json=[_pr(number=5, title="Fix bug", login="hugoh")],
         status=200,
     )
+    _mock_open_pr_extras(number=5)
     prs = fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
     assert prs == [
         {
@@ -76,6 +103,8 @@ def test_fetch_prs_normalizes_fields():
             "closed_at": None,
             "merged": False,
             "state": "open",
+            "ci_status": "passing",
+            "mergeable": "clean",
         }
     ]
 
@@ -91,6 +120,7 @@ def test_fetch_prs_excludes_prs_updated_before_since():
         ],
         status=200,
     )
+    _mock_open_pr_extras(number=2)
     prs = fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
     assert [pr["number"] for pr in prs] == [2]
 
@@ -172,11 +202,92 @@ def test_fetch_prs_combines_multiple_repos():
         json=[_pr(number=2)],
         status=200,
     )
+    _mock_open_pr_extras(repo="repo-a", number=1)
+    _mock_open_pr_extras(repo="repo-b", number=2)
     prs = fetch_prs("hugoh", [REPO_A, REPO_B], SINCE_OPEN)
     assert sorted((pr["repo"], pr["number"]) for pr in prs) == [
         ("repo-a", 1),
         ("repo-b", 2),
     ]
+
+
+# ---------------------------------------------------------------------------
+# CI status / mergeable state (open PRs only -- closed PRs skip these two
+# extra fetches, since a closed PR's CI/conflict state isn't actionable)
+# ---------------------------------------------------------------------------
+
+
+@responses.activate
+def test_fetch_prs_ci_status_pending_when_a_check_is_not_completed():
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/repos/hugoh/repo-a/pulls",
+        json=[_pr(number=1)],
+        status=200,
+    )
+    _mock_open_pr_extras(
+        number=1, check_runs=[_check_run(status="in_progress", conclusion=None)]
+    )
+    prs = fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
+    assert prs[0]["ci_status"] == "pending"
+
+
+@responses.activate
+def test_fetch_prs_ci_status_failing_when_a_check_failed():
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/repos/hugoh/repo-a/pulls",
+        json=[_pr(number=1)],
+        status=200,
+    )
+    _mock_open_pr_extras(
+        number=1,
+        check_runs=[_check_run(), _check_run(conclusion="failure")],
+    )
+    prs = fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
+    assert prs[0]["ci_status"] == "failing"
+
+
+@responses.activate
+def test_fetch_prs_ci_status_no_checks_when_no_check_runs():
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/repos/hugoh/repo-a/pulls",
+        json=[_pr(number=1)],
+        status=200,
+    )
+    _mock_open_pr_extras(number=1, check_runs=[])
+    prs = fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
+    assert prs[0]["ci_status"] == "no checks"
+
+
+@responses.activate
+def test_fetch_prs_mergeable_conflict_when_dirty():
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/repos/hugoh/repo-a/pulls",
+        json=[_pr(number=1)],
+        status=200,
+    )
+    _mock_open_pr_extras(number=1, mergeable_state="dirty")
+    prs = fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
+    assert prs[0]["mergeable"] == "conflict"
+
+
+@responses.activate
+def test_fetch_prs_mergeable_clean_when_state_unknown():
+    # mergeable_state can be null/"unknown" right after a push, before
+    # GitHub finishes computing it -- treated the same as clean, not
+    # flagged as a conflict.
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/repos/hugoh/repo-a/pulls",
+        json=[_pr(number=1)],
+        status=200,
+    )
+    _mock_open_pr_extras(number=1, mergeable_state="unknown")
+    prs = fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
+    assert prs[0]["mergeable"] == "clean"
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +306,8 @@ def _normalized_pr(**overrides):
         "closed_at": None,
         "merged": False,
         "state": "open",
+        "ci_status": "passing",
+        "mergeable": "clean",
     }
     base.update(overrides)
     return base
@@ -300,6 +413,59 @@ def test_render_html_section_headers_show_each_windows_own_date_range():
     assert "2026-07-10" in html  # since_open
     assert "2026-07-17" in html  # since_closed
     assert "2026-07-24" in html  # until, shared
+
+
+def test_render_html_shows_ci_status_and_mergeable_for_open_prs():
+    pr = _normalized_pr(ci_status="failing", mergeable="conflict")
+    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    assert "failing" in html
+    assert "conflict" in html
+
+
+def test_render_html_color_codes_passing_ci_status():
+    pr = _normalized_pr(ci_status="passing")
+    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    assert "status-passing" in html
+
+
+def test_render_html_color_codes_failing_ci_status():
+    pr = _normalized_pr(ci_status="failing")
+    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    assert "status-failing" in html
+
+
+def test_render_html_color_codes_pending_ci_status():
+    pr = _normalized_pr(ci_status="pending")
+    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    assert "status-pending" in html
+
+
+def test_render_html_color_codes_no_checks_ci_status():
+    pr = _normalized_pr(ci_status="no checks")
+    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    assert "status-no-checks" in html
+
+
+def test_render_html_color_codes_clean_mergeable():
+    pr = _normalized_pr(mergeable="clean")
+    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    assert "mergeable-clean" in html
+
+
+def test_render_html_color_codes_conflict_mergeable():
+    pr = _normalized_pr(mergeable="conflict")
+    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    assert "mergeable-conflict" in html
+
+
+def test_render_html_closed_section_has_no_ci_or_mergeable_columns():
+    pr = _normalized_pr(
+        state="closed", merged=True, closed_at=datetime(2026, 7, 21, tzinfo=UTC)
+    )
+    html = render_html([pr], SINCE_OPEN, SINCE_CLOSED, UNTIL)
+    closed_section = html[html.index("Closed (") :]
+    assert "status-" not in closed_section
+    assert "mergeable-" not in closed_section
 
 
 def test_render_html_escapes_title():

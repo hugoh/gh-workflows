@@ -22,9 +22,18 @@ from email.mime.text import MIMEText
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-from lib import DEFAULT_OWNER, GhError, Repo, api_request, error_message, list_repos
+from lib import (
+    DEFAULT_OWNER,
+    GhError,
+    Repo,
+    api_json,
+    api_request,
+    error_message,
+    list_repos,
+)
 
 _PER_PAGE = "100"
+_FAILING_CONCLUSIONS = {"failure", "timed_out", "cancelled", "action_required"}
 
 
 def _parse_dt(value: str) -> datetime:
@@ -47,6 +56,33 @@ def _normalize_pr(repo_name: str, item: dict) -> dict:
         "merged": item["merged_at"] is not None,
         "state": item["state"],
     }
+
+
+def _ci_status(owner: str, name: str, sha: str) -> str:
+    """Rolls a commit's check runs up into one summary: "no checks" if none
+    exist, "pending" if any haven't completed, "failing" if any completed
+    one failed, else "passing".
+    """
+    response = api_request("GET", f"/repos/{owner}/{name}/commits/{sha}/check-runs")
+    if not response.ok:
+        raise GhError(error_message(response), status_code=response.status_code)
+    runs = response.json()["check_runs"]
+    if not runs:
+        return "no checks"
+    if any(run["status"] != "completed" for run in runs):
+        return "pending"
+    if any(run["conclusion"] in _FAILING_CONCLUSIONS for run in runs):
+        return "failing"
+    return "passing"
+
+
+def _mergeable_status(owner: str, name: str, number: int) -> str:
+    """ "dirty" is GitHub's mergeable_state for an actual merge conflict;
+    everything else (including null/"unknown" right after a push, before
+    GitHub finishes computing it) is treated as clean rather than flagged.
+    """
+    data = api_json("GET", f"/repos/{owner}/{name}/pulls/{number}")
+    return "conflict" if data.get("mergeable_state") == "dirty" else "clean"
 
 
 def _fetch_repo_prs(owner: str, name: str, since_updated: datetime) -> list[dict]:
@@ -82,7 +118,11 @@ def _fetch_repo_prs(owner: str, name: str, since_updated: datetime) -> list[dict
             if _parse_dt(item["updated_at"]) < since_updated:
                 page_exhausted = True
                 break
-            prs.append(_normalize_pr(name, item))
+            pr = _normalize_pr(name, item)
+            if pr["state"] == "open":
+                pr["ci_status"] = _ci_status(owner, name, item["head"]["sha"])
+                pr["mergeable"] = _mergeable_status(owner, name, pr["number"])
+            prs.append(pr)
 
         if page_exhausted or len(items) < int(_PER_PAGE):
             break
