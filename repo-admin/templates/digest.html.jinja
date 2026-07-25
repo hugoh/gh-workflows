@@ -12,12 +12,14 @@ td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid #ddd; font
 .status-failing, .mergeable-conflict { color: #cf222e; font-weight: 600; }
 .status-pending { color: #9a6700; font-weight: 600; }
 .status-no-checks { color: #666; }
+.release-stable { color: #1a7f37; font-weight: 600; }
+.release-prerelease { color: #9a6700; font-weight: 600; }
 </style>
 </head>
 <body>
 <h1>PR digest</h1>
 {% macro section(title, since, until, prs, show_status, show_ci) %}
-<h2>{{ title }} ({{ since.strftime("%Y-%m-%d") }} to {{ until.strftime("%Y-%m-%d") }})</h2>
+<h2>{{ title }} ({{ prs|length }}) ({{ since.strftime("%Y-%m-%d") }} to {{ until.strftime("%Y-%m-%d") }})</h2>
 {% if not prs %}
 <p class="empty">No {{ title.lower() }} PRs in this period.</p>
 {% else %}
@@ -46,7 +48,27 @@ td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid #ddd; font
 </table>
 {% endif %}
 {% endmacro %}
+{% macro releases_section(since, until, releases) %}
+<h2>Releases ({{ releases|length }}) ({{ since.strftime("%Y-%m-%d") }} to {{ until.strftime("%Y-%m-%d") }})</h2>
+{% if not releases %}
+<p class="empty">No releases in this period.</p>
+{% else %}
+<table>
+<tr>
+  <th>Release</th><th>Repo</th><th>Published</th><th>Type</th>
+</tr>
+{% for release in releases %}
+<tr>
+  <td><a href="{{ release.url }}">{{ release.repo }} {{release.tag_name}}</a></td>
+  <td>{{ release.published_at.strftime("%Y-%m-%d") }}</td>
+  <td class="{{ "release-prerelease" if release.prerelease else "release-stable" }}">{{ "prerelease" if release.prerelease else "release" }}</td>
+</tr>
+{% endfor %}
+</table>
+{% endif %}
+{% endmacro %}
 {{ section("Open", since_open, until, open_prs, false, true) }}
+{{ releases_section(since_release, until, releases) }}
 {{ section("Closed", since_closed, until, closed_prs, true, false) }}
 </body>
 </html>

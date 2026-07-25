@@ -1,4 +1,4 @@
-name: pr-digest
+name: digest
 
 permissions:
   contents: read
