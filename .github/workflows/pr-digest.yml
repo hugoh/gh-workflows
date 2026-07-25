@@ -1,0 +1,30 @@
+name: pr-digest
+
+permissions:
+  contents: read
+
+on: # yamllint disable-line rule:truthy
+  schedule:
+    - cron: "0 10 * * 6" # 5am Central (fixed UTC-5 offset; drifts to 4am during CST)
+  workflow_dispatch: {}
+
+jobs:
+  digest:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - name: Send PR digest
+        working-directory: repo-admin
+        env:
+          GH_TOKEN: ${{ secrets.PR_DIGEST_PAT }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          DIGEST_FROM_EMAIL: ${{ secrets.DIGEST_FROM_EMAIL }}
+          DIGEST_TO_EMAIL: ${{ secrets.DIGEST_TO_EMAIL }}
+        run: uv run digest.py
