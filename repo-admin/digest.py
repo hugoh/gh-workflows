@@ -13,6 +13,7 @@ repo_admin.py.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import os
 import smtplib
 import sys
@@ -23,6 +24,7 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from lib import (
+    DEFAULT_JOBS,
     DEFAULT_OWNER,
     GhError,
     Repo,
@@ -31,6 +33,7 @@ from lib import (
     error_message,
     list_repos,
 )
+from rich.progress import Progress
 
 _PER_PAGE = "100"
 _FAILING_CONCLUSIONS = {"failure", "timed_out", "cancelled", "action_required"}
@@ -130,10 +133,27 @@ def _fetch_repo_prs(owner: str, name: str, since_updated: datetime) -> list[dict
     return prs
 
 
-def fetch_prs(owner: str, repos: list[Repo], since_updated: datetime) -> list[dict]:
+def fetch_prs(
+    owner: str, repos: list[Repo], since_updated: datetime, jobs: int = DEFAULT_JOBS
+) -> list[dict]:
+    """Fetches every repo concurrently -- these are I/O-bound network calls
+    (one repo's fetch doesn't depend on another's), and with dozens of repos
+    doing them serially dominates the script's runtime. lib.py's requests
+    Session is thread-local specifically to support this.
+    """
     prs = []
-    for repo in repos:
-        prs.extend(_fetch_repo_prs(owner, repo.name, since_updated))
+    with (
+        concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool,
+        Progress() as progress,
+    ):
+        task = progress.add_task("Fetching PRs...", total=len(repos))
+        futures = [
+            pool.submit(_fetch_repo_prs, owner, repo.name, since_updated)
+            for repo in repos
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            prs.extend(future.result())
+            progress.advance(task)
     return prs
 
 
