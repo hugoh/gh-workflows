@@ -27,6 +27,8 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
       - name: hk checks
+        env:
+          PINACT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: hk check --no-progress --profile ci --all
       - name: Display hk log on failure
         if: failure()
