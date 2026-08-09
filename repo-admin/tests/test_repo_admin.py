@@ -465,21 +465,62 @@ def test_branch_protection_payload():
     }
 
 
-def test_branch_protection_worker_limited_unchanged_when_no_prs(monkeypatch):
+def test_branch_protection_payload_no_contexts_omits_required_status_checks():
+    payload = repo_admin.branch_protection_payload([])
+    assert payload["required_status_checks"] is None
+    assert payload["enforce_admins"] is True
+    assert payload["allow_force_pushes"] is False
+    assert payload["allow_deletions"] is False
+
+
+def test_branch_protection_up_to_date_true_with_no_contexts_and_none_required():
+    current = {
+        "required_status_checks": None,
+        "enforce_admins": {"enabled": True},
+        "allow_force_pushes": {"enabled": False},
+        "allow_deletions": {"enabled": False},
+        "required_pull_request_reviews": {"required_approving_review_count": 0},
+    }
+    assert repo_admin.branch_protection_up_to_date(current, []) is True
+
+
+def test_branch_protection_worker_dry_run_ok_when_no_prs(monkeypatch):
     monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", lambda owner, name: [])
+    monkeypatch.setattr(repo_admin, "api_request", lambda *a, **k: _FakeResponse(404))
     worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=True)
     result = worker(REPO)
-    assert result.status == Status.LIMITED_UNCHANGED
-    assert result.line.startswith(f"{'repo':<30} unchanged: no pull requests found")
+    assert result.status == Status.OK
+    assert "no pull requests found yet" in result.line
+    assert "(none yet)" in result.line
 
 
-def test_branch_protection_worker_limited_unchanged_when_no_check_runs(monkeypatch):
+def test_branch_protection_worker_dry_run_ok_when_no_check_runs(monkeypatch):
     monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", lambda owner, name: ["sha"])
     monkeypatch.setattr(repo_admin, "_check_run_contexts", lambda owner, name, shas: [])
+    monkeypatch.setattr(repo_admin, "api_request", lambda *a, **k: _FakeResponse(404))
     worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=True)
     result = worker(REPO)
-    assert result.status == Status.LIMITED_UNCHANGED
-    assert result.line.startswith(f"{'repo':<30} unchanged: no check runs found")
+    assert result.status == Status.OK
+    assert "no check runs found" in result.line
+    assert "(none yet)" in result.line
+
+
+def test_branch_protection_worker_apply_ok_when_no_prs_yet(monkeypatch):
+    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", lambda owner, name: [])
+
+    calls = []
+
+    def fake_api_request(method, *a, **k):
+        calls.append(method)
+        return _FakeResponse(404) if method == "GET" else _FakeResponse(200)
+
+    monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
+    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=False)
+    result = worker(REPO)
+    assert result.status == Status.OK
+    assert result.tag == repo_admin.Tag.APPLIED_NO_CHECKS
+    assert "protected" in result.line
+    assert "PUT" in calls
 
 
 def test_branch_protection_worker_dry_run_limited_unchanged_when_plan_gated(

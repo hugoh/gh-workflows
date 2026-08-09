@@ -49,7 +49,7 @@ class Tag(enum.StrEnum):
     """
 
     APPLIED = "applied"
-    SKIPPED_NO_CHECKS = "skipped_no_checks"
+    APPLIED_NO_CHECKS = "applied_no_checks"
     SKIPPED_NO_PLAN = "skipped_no_plan"
     UNAVAILABLE = "unavailable"
 
@@ -354,7 +354,9 @@ def cmd_security_features(args: argparse.Namespace) -> int:
 
 def branch_protection_payload(contexts: list[str]) -> dict:
     return {
-        "required_status_checks": {"strict": True, "contexts": contexts},
+        "required_status_checks": (
+            {"strict": True, "contexts": contexts} if contexts else None
+        ),
         "enforce_admins": True,
         "required_pull_request_reviews": {"required_approving_review_count": 0},
         "restrictions": None,
@@ -366,9 +368,19 @@ def branch_protection_payload(contexts: list[str]) -> dict:
 def branch_protection_up_to_date(current: dict | None, contexts: list[str]) -> bool:
     current = current or {}
     required_status_checks = current.get("required_status_checks") or {}
+    current_contexts = required_status_checks.get("contexts") or []
+    if contexts:
+        checks_ok = (
+            sorted(current_contexts) == sorted(contexts)
+            and required_status_checks.get("strict") is True
+        )
+    else:
+        # No known checks to require yet (no PRs, or no check runs on the
+        # latest one) -- the baseline (no force-push/deletion, PR required,
+        # admins enforced) still applies without gating on specific contexts.
+        checks_ok = not current_contexts
     return (
-        sorted(required_status_checks.get("contexts") or []) == sorted(contexts)
-        and required_status_checks.get("strict") is True
+        checks_ok
         and (current.get("enforce_admins") or {}).get("enabled") is True
         and (current.get("allow_force_pushes") or {}).get("enabled") is False
         and (current.get("allow_deletions") or {}).get("enabled") is False
@@ -444,11 +456,6 @@ def _check_run_contexts(owner: str, name: str, shas: list[str]) -> list[str]:
     return sorted(contexts)
 
 
-def _skip_result(repo: Repo, detail: str, tag: Tag) -> RepoResult:
-    status = Status.LIMITED_UNCHANGED
-    return RepoResult(repo, result_line(repo.name, detail, status), status, tag=tag)
-
-
 def _plan_gated_result(repo: Repo, *, tag: Tag | None = None) -> RepoResult:
     status = Status.LIMITED_UNCHANGED
     detail = "private repo, plan does not allow branch protection"
@@ -457,21 +464,24 @@ def _plan_gated_result(repo: Repo, *, tag: Tag | None = None) -> RepoResult:
 
 def make_branch_protection_worker(owner: str, dry_run: bool):
     def worker(repo: Repo) -> RepoResult:
+        # Contexts to require are derived from a recent PR's check runs when
+        # available. Without any (a brand-new repo, or one that's only ever
+        # been pushed to directly), the baseline protection -- PR required,
+        # no force-push/deletion, admins enforced -- still applies; it just
+        # can't gate on specific status checks yet. A later run picks up
+        # contexts once a PR exists to sample them from.
         pr_head_shas = _recent_pr_head_shas(owner, repo.name)
+        contexts: list[str] = []
+        pending_note = None
         if not pr_head_shas:
-            return _skip_result(
-                repo,
-                "no pull requests found, skipping (nothing to detect PR-gating checks from)",
-                Tag.SKIPPED_NO_CHECKS,
-            )
-
-        contexts = _check_run_contexts(owner, repo.name, pr_head_shas)
-        if not contexts:
-            return _skip_result(
-                repo,
-                f"no check runs found on latest PR commit {pr_head_shas[0]}, skipping",
-                Tag.SKIPPED_NO_CHECKS,
-            )
+            pending_note = "no pull requests found yet, requiring none for now"
+        else:
+            contexts = _check_run_contexts(owner, repo.name, pr_head_shas)
+            if not contexts:
+                pending_note = (
+                    f"no check runs found on latest PR commit {pr_head_shas[0]}, "
+                    "requiring none for now"
+                )
 
         protection_response = api_request(
             "GET",
@@ -492,20 +502,24 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
             )
         up_to_date = branch_protection_up_to_date(current, contexts)
 
+        require_desc = ", ".join(contexts) if contexts else "(none yet)"
+        suffix = f"; {pending_note}" if pending_note else ""
+        tag = Tag.APPLIED if contexts else Tag.APPLIED_NO_CHECKS
+
         if dry_run:
             if up_to_date:
                 status = Status.UNCHANGED
-                detail = ", ".join(contexts)
+                detail = f"{require_desc}{suffix}"
                 return RepoResult(repo, result_line(repo.name, detail, status), status)
             status = Status.OK
-            detail = f"would update -> require: {', '.join(contexts)}"
+            detail = f"would update -> require: {require_desc}{suffix}"
             return RepoResult(repo, result_line(repo.name, detail, status), status)
 
         if up_to_date:
             status = Status.UNCHANGED
-            detail = ", ".join(contexts)
+            detail = f"{require_desc}{suffix}"
             return RepoResult(
-                repo, result_line(repo.name, detail, status), status, tag=Tag.APPLIED
+                repo, result_line(repo.name, detail, status), status, tag=tag
             )
 
         payload = branch_protection_payload(contexts)
@@ -522,10 +536,8 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
             )
 
         status = Status.OK
-        detail = f"protected ({', '.join(contexts)})"
-        return RepoResult(
-            repo, result_line(repo.name, detail, status), status, tag=Tag.APPLIED
-        )
+        detail = f"protected ({require_desc}){suffix}"
+        return RepoResult(repo, result_line(repo.name, detail, status), status, tag=tag)
 
     return worker
 
@@ -540,17 +552,18 @@ def cmd_branch_protection(args: argparse.Namespace) -> int:
         return 0
 
     applied = [r for r in results if r.tag == Tag.APPLIED]
-    skipped_no_checks = sorted(
-        r.repo.name for r in results if r.tag == Tag.SKIPPED_NO_CHECKS
+    applied_no_checks = sorted(
+        r.repo.name for r in results if r.tag == Tag.APPLIED_NO_CHECKS
     )
     skipped_no_plan = sorted(
         r.repo.name for r in results if r.tag == Tag.SKIPPED_NO_PLAN
     )
     print()
     print("Summary:")
-    print(f"  Protected: {len(applied)}")
+    print(f"  Protected (with required status checks): {len(applied)}")
     print(
-        f"  Skipped (no PRs / no check runs yet): {' '.join(skipped_no_checks) or 'none'}"
+        "  Protected (no required status checks yet -- no PRs / no check runs "
+        f"seen): {' '.join(applied_no_checks) or 'none'}"
     )
     print(
         "  Skipped (plan doesn't allow branch protection on private repos): "
