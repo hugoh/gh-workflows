@@ -1,9 +1,9 @@
-import threading
-import time
+import asyncio
 
+import httpx
 import lib
 import pytest
-import responses
+import respx
 from lib import (
     API_BASE,
     GhError,
@@ -174,77 +174,77 @@ def test_print_status_does_not_interpret_brackets_in_line_as_markup(capsys):
     assert "{'allow_auto_merge': True} -> [oops]" in out
 
 
-def test_run_parallel_returns_worker_results_for_every_repo():
+async def test_run_parallel_returns_worker_results_for_every_repo():
     repos = [
         Repo(name=f"repo{i}", default_branch="main", is_private=False, is_fork=False)
         for i in range(5)
     ]
 
-    def worker(repo):
+    async def worker(repo):
         return RepoResult(repo=repo, line=f"{repo.name} done")
 
-    results = run_parallel(repos, worker, jobs=3)
+    results = await run_parallel(repos, worker, jobs=3)
     assert sorted(r.repo.name for r in results) == sorted(r.name for r in repos)
 
 
-def test_run_parallel_prints_each_worker_result_line(capsys):
+async def test_run_parallel_prints_each_worker_result_line(capsys):
     repos = [
         Repo(name="repo-a", default_branch="main", is_private=False, is_fork=False)
     ]
 
-    def worker(repo):
+    async def worker(repo):
         return RepoResult(repo=repo, line=f"{repo.name} line")
 
-    run_parallel(repos, worker, jobs=1)
+    await run_parallel(repos, worker, jobs=1)
     assert "repo-a line" in capsys.readouterr().out
 
 
-def test_run_parallel_runs_workers_concurrently():
+async def test_run_parallel_runs_workers_concurrently():
     repos = [
         Repo(name=f"repo{i}", default_branch="main", is_private=False, is_fork=False)
         for i in range(4)
     ]
-    barrier = threading.Barrier(4, timeout=2)
+    barrier = asyncio.Barrier(4)
 
-    def worker(repo):
-        barrier.wait()
+    async def worker(repo):
+        await barrier.wait()
         return RepoResult(repo=repo, line=repo.name)
 
     # If run_parallel executed workers serially, the barrier would never
     # release with only 1 worker present at a time and this would time out.
-    run_parallel(repos, worker, jobs=4)
+    await asyncio.wait_for(run_parallel(repos, worker, jobs=4), timeout=2)
 
 
-def test_run_parallel_one_failure_does_not_block_others():
+async def test_run_parallel_one_failure_does_not_block_others():
     repos = [
         Repo(name=f"repo{i}", default_branch="main", is_private=False, is_fork=False)
         for i in range(3)
     ]
     completed = []
 
-    def worker(repo):
+    async def worker(repo):
         if repo.name == "repo1":
             raise RuntimeError("boom")
-        time.sleep(0.05)
+        await asyncio.sleep(0.05)
         completed.append(repo.name)
         return RepoResult(repo=repo, line=repo.name)
 
     with pytest.raises(GhError):
-        run_parallel(repos, worker, jobs=3)
+        await run_parallel(repos, worker, jobs=3)
 
     assert sorted(completed) == ["repo0", "repo2"]
 
 
-def test_run_parallel_reports_failed_repo_names_in_error(capsys):
+async def test_run_parallel_reports_failed_repo_names_in_error(capsys):
     repos = [
         Repo(name="bad-repo", default_branch="main", is_private=False, is_fork=False)
     ]
 
-    def worker(repo):
+    async def worker(repo):
         raise RuntimeError("network error")
 
     with pytest.raises(GhError, match="bad-repo"):
-        run_parallel(repos, worker, jobs=1)
+        await run_parallel(repos, worker, jobs=1)
     assert "bad-repo" in capsys.readouterr().out
 
 
@@ -256,122 +256,110 @@ def test_run_parallel_reports_failed_repo_names_in_error(capsys):
 @pytest.fixture(autouse=True)
 def fake_auth_token(monkeypatch):
     # Avoids every test in this module shelling out to the real `gh auth
-    # token` -- session creation is lazy and thread-local, so this just
-    # needs to be in place before the first api_request/api_json call.
+    # token` -- client creation is lazy, so this just needs to be in place
+    # before the first api_request/api_json call.
     monkeypatch.setattr("lib._auth_token", lambda: "fake-token")
 
 
-@responses.activate
-def test_error_message_prefers_json_message_field():
-    responses.add(
-        responses.GET, f"{API_BASE}/x", json={"message": "not found"}, status=404
+@respx.mock
+async def test_error_message_prefers_json_message_field():
+    respx.get(f"{API_BASE}/x").mock(
+        return_value=httpx.Response(404, json={"message": "not found"})
     )
-    response = api_request("GET", "/x")
+    response = await api_request("GET", "/x")
     assert error_message(response) == "not found"
 
 
-@responses.activate
-def test_error_message_falls_back_to_raw_text_for_non_json_body():
-    responses.add(
-        responses.GET,
-        f"{API_BASE}/x",
-        body="plain text error",
-        status=500,
-        content_type="text/plain",
+@respx.mock
+async def test_error_message_falls_back_to_raw_text_for_non_json_body():
+    respx.get(f"{API_BASE}/x").mock(
+        return_value=httpx.Response(
+            500, text="plain text error", headers={"Content-Type": "text/plain"}
+        )
     )
-    response = api_request("GET", "/x")
+    response = await api_request("GET", "/x")
     assert error_message(response) == "plain text error"
 
 
-@responses.activate
-def test_api_json_returns_parsed_body_on_success():
-    responses.add(
-        responses.GET,
-        f"{API_BASE}/repos/hugoh/gh-workflows",
-        json={"name": "gh-workflows"},
-        status=200,
+@respx.mock
+async def test_api_json_returns_parsed_body_on_success():
+    respx.get(f"{API_BASE}/repos/hugoh/gh-workflows").mock(
+        return_value=httpx.Response(200, json={"name": "gh-workflows"})
     )
-    assert api_json("GET", "/repos/hugoh/gh-workflows") == {"name": "gh-workflows"}
+    assert await api_json("GET", "/repos/hugoh/gh-workflows") == {
+        "name": "gh-workflows"
+    }
 
 
-@responses.activate
-def test_api_json_raises_gh_error_with_status_code_on_failure():
-    responses.add(
-        responses.GET,
-        f"{API_BASE}/repos/hugoh/nope",
-        json={"message": "Not Found"},
-        status=404,
+@respx.mock
+async def test_api_json_raises_gh_error_with_status_code_on_failure():
+    respx.get(f"{API_BASE}/repos/hugoh/nope").mock(
+        return_value=httpx.Response(404, json={"message": "Not Found"})
     )
     with pytest.raises(GhError) as exc_info:
-        api_json("GET", "/repos/hugoh/nope")
+        await api_json("GET", "/repos/hugoh/nope")
     assert exc_info.value.status_code == 404
     assert "Not Found" in str(exc_info.value)
 
 
-@responses.activate
-def test_api_json_handles_empty_204_response():
-    responses.add(
-        responses.PUT,
-        f"{API_BASE}/repos/hugoh/gh-workflows/vulnerability-alerts",
-        status=204,
+@respx.mock
+async def test_api_json_handles_empty_204_response():
+    respx.put(f"{API_BASE}/repos/hugoh/gh-workflows/vulnerability-alerts").mock(
+        return_value=httpx.Response(204)
     )
-    assert api_json("PUT", "/repos/hugoh/gh-workflows/vulnerability-alerts") == {}
+    assert await api_json("PUT", "/repos/hugoh/gh-workflows/vulnerability-alerts") == {}
 
 
-@responses.activate
-def test_api_request_does_not_raise_on_http_error_status():
-    responses.add(
-        responses.GET,
-        f"{API_BASE}/repos/hugoh/private-repo/private-vulnerability-reporting",
-        status=404,
-    )
-    response = api_request(
+@respx.mock
+async def test_api_request_does_not_raise_on_http_error_status():
+    respx.get(
+        f"{API_BASE}/repos/hugoh/private-repo/private-vulnerability-reporting"
+    ).mock(return_value=httpx.Response(404))
+    response = await api_request(
         "GET", "/repos/hugoh/private-repo/private-vulnerability-reporting"
     )
     assert response.status_code == 404
 
 
-@responses.activate
-def test_fetch_repos_json_uses_authenticated_user_repos_when_owner_matches():
-    responses.add(
-        responses.GET, f"{API_BASE}/user", json={"login": "hugoh"}, status=200
+@respx.mock
+async def test_fetch_repos_json_uses_authenticated_user_repos_when_owner_matches():
+    respx.get(f"{API_BASE}/user").mock(
+        return_value=httpx.Response(200, json={"login": "hugoh"})
     )
-    responses.add(
-        responses.GET, f"{API_BASE}/user/repos", json=[{"name": "a"}], status=200
+    respx.get(f"{API_BASE}/user/repos").mock(
+        return_value=httpx.Response(200, json=[{"name": "a"}])
     )
-    assert fetch_repos_json("hugoh") == [{"name": "a"}]
+    assert await fetch_repos_json("hugoh") == [{"name": "a"}]
 
 
-@responses.activate
-def test_fetch_repos_json_falls_back_to_public_repos_for_other_owners():
-    responses.add(
-        responses.GET, f"{API_BASE}/user", json={"login": "hugoh"}, status=200
+@respx.mock
+async def test_fetch_repos_json_falls_back_to_public_repos_for_other_owners():
+    respx.get(f"{API_BASE}/user").mock(
+        return_value=httpx.Response(200, json={"login": "hugoh"})
     )
-    responses.add(
-        responses.GET,
-        f"{API_BASE}/users/someorg/repos",
-        json=[{"name": "b"}],
-        status=200,
+    respx.get(f"{API_BASE}/users/someorg/repos").mock(
+        return_value=httpx.Response(200, json=[{"name": "b"}])
     )
-    assert fetch_repos_json("someorg") == [{"name": "b"}]
+    assert await fetch_repos_json("someorg") == [{"name": "b"}]
 
 
-@responses.activate
-def test_fetch_repos_json_follows_pagination_link_header():
-    responses.add(
-        responses.GET, f"{API_BASE}/user", json={"login": "hugoh"}, status=200
+@respx.mock
+async def test_fetch_repos_json_follows_pagination_link_header():
+    respx.get(f"{API_BASE}/user").mock(
+        return_value=httpx.Response(200, json={"login": "hugoh"})
     )
-    responses.add(
-        responses.GET,
-        f"{API_BASE}/user/repos",
-        json=[{"name": "page1"}],
-        status=200,
-        headers={"Link": f'<{API_BASE}/user/repos?page=2>; rel="next"'},
+    # respx routes are tried in registration order and a route with no
+    # `params` constraint matches any query string -- the page=2 route must
+    # be registered first, or the unconstrained page-1 route below would
+    # swallow it too and _paginated would loop on page1 forever.
+    respx.get(f"{API_BASE}/user/repos", params={"page": "2"}).mock(
+        return_value=httpx.Response(200, json=[{"name": "page2"}])
     )
-    responses.add(
-        responses.GET,
-        f"{API_BASE}/user/repos?page=2",
-        json=[{"name": "page2"}],
-        status=200,
+    respx.get(f"{API_BASE}/user/repos").mock(
+        return_value=httpx.Response(
+            200,
+            json=[{"name": "page1"}],
+            headers={"Link": f'<{API_BASE}/user/repos?page=2>; rel="next"'},
+        )
     )
-    assert fetch_repos_json("hugoh") == [{"name": "page1"}, {"name": "page2"}]
+    assert await fetch_repos_json("hugoh") == [{"name": "page1"}, {"name": "page2"}]

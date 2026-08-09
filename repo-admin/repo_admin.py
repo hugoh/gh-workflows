@@ -23,9 +23,11 @@ first and review the output.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import enum
 import sys
 
+import lib
 from lib import (
     DEFAULT_OWNER,
     GhError,
@@ -41,6 +43,8 @@ from lib import (
     result_line,
     run_parallel,
 )
+from rich.progress import Progress
+from rich.table import Table
 
 
 class Tag(enum.StrEnum):
@@ -59,16 +63,23 @@ class Tag(enum.StrEnum):
 # ---------------------------------------------------------------------------
 
 
-def cmd_list(args: argparse.Namespace) -> int:
-    repos = list_repos(DEFAULT_OWNER, only=as_set(args.only), skip=as_set(args.skip))
-    header = ("NAME", "DEFAULT BRANCH", "PRIVATE", "FORK")
-    rows = [header] + [
-        (r.name, r.default_branch, str(r.is_private).lower(), str(r.is_fork).lower())
-        for r in repos
-    ]
-    widths = [max(len(row[i]) for row in rows) for i in range(len(header))]
-    for row in rows:
-        print("  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())
+async def cmd_list(args: argparse.Namespace) -> int:
+    with Progress(console=lib.console, transient=True) as progress:
+        progress.add_task("Fetching repos...", total=None)
+        repos = await list_repos(
+            DEFAULT_OWNER, only=as_set(args.only), skip=as_set(args.skip)
+        )
+
+    table = Table()
+    table.add_column("NAME")
+    table.add_column("DEFAULT BRANCH")
+    table.add_column("PRIVATE")
+    table.add_column("FORK")
+    for r in repos:
+        table.add_row(
+            r.name, r.default_branch, str(r.is_private).lower(), str(r.is_fork).lower()
+        )
+    lib.console.print(table)
     return 0
 
 
@@ -89,8 +100,8 @@ MERGE_SETTINGS_FIELDS = [
 ]
 
 
-def _merge_settings(owner: str, name: str) -> dict:
-    data = api_json("GET", f"/repos/{owner}/{name}")
+async def _merge_settings(owner: str, name: str) -> dict:
+    data = await api_json("GET", f"/repos/{owner}/{name}")
     return {field: data[field] for field in MERGE_SETTINGS_FIELDS}
 
 
@@ -114,9 +125,9 @@ def merge_settings_apply_line(
 
 
 def make_merge_settings_worker(owner: str, dry_run: bool):
-    def worker(repo: Repo) -> RepoResult:
+    async def worker(repo: Repo) -> RepoResult:
         if dry_run:
-            current = _merge_settings(owner, repo.name)
+            current = await _merge_settings(owner, repo.name)
             status = (
                 Status.UNCHANGED if merge_settings_at_target(current) else Status.OK
             )
@@ -124,13 +135,13 @@ def make_merge_settings_worker(owner: str, dry_run: bool):
                 repo, merge_settings_dry_run_line(repo.name, current, status), status
             )
 
-        before = _merge_settings(owner, repo.name)
-        api_json(
+        before = await _merge_settings(owner, repo.name)
+        await api_json(
             "PATCH",
             f"/repos/{owner}/{repo.name}",
             json={field: True for field in MERGE_SETTINGS_FIELDS},
         )
-        after = _merge_settings(owner, repo.name)
+        after = await _merge_settings(owner, repo.name)
         status = classify_status(
             at_target=merge_settings_at_target(after), changed=before != after
         )
@@ -141,9 +152,11 @@ def make_merge_settings_worker(owner: str, dry_run: bool):
     return worker
 
 
-def cmd_merge_settings(args: argparse.Namespace) -> int:
-    repos = list_repos(DEFAULT_OWNER, only=as_set(args.only), skip=as_set(args.skip))
-    run_parallel(repos, make_merge_settings_worker(DEFAULT_OWNER, args.dry_run))
+async def cmd_merge_settings(args: argparse.Namespace) -> int:
+    repos = await list_repos(
+        DEFAULT_OWNER, only=as_set(args.only), skip=as_set(args.skip)
+    )
+    await run_parallel(repos, make_merge_settings_worker(DEFAULT_OWNER, args.dry_run))
     return 0
 
 
@@ -208,12 +221,16 @@ def security_dry_run_line(name: str, summary: dict, status: Status) -> str:
     return result_line(name, detail, status)
 
 
-def _fetch_security_state(owner: str, name: str) -> tuple[dict, bool, dict | None]:
-    repo_json = api_json("GET", f"/repos/{owner}/{name}")
+async def _fetch_security_state(
+    owner: str, name: str
+) -> tuple[dict, bool, dict | None]:
+    repo_json = await api_json("GET", f"/repos/{owner}/{name}")
 
     # 204 = enabled, 404 = disabled -- GitHub's documented shape for this
     # endpoint, not an error either way.
-    vuln_response = api_request("GET", f"/repos/{owner}/{name}/vulnerability-alerts")
+    vuln_response = await api_request(
+        "GET", f"/repos/{owner}/{name}/vulnerability-alerts"
+    )
     if vuln_response.status_code not in (204, 404):
         raise GhError(
             error_message(vuln_response), status_code=vuln_response.status_code
@@ -221,7 +238,7 @@ def _fetch_security_state(owner: str, name: str) -> tuple[dict, bool, dict | Non
     vuln_alerts_enabled = vuln_response.status_code == 204
 
     # 200 = available (body has "enabled"), 404 = not available on this plan.
-    pvr_response = api_request(
+    pvr_response = await api_request(
         "GET", f"/repos/{owner}/{name}/private-vulnerability-reporting"
     )
     if pvr_response.status_code not in (200, 404):
@@ -232,8 +249,8 @@ def _fetch_security_state(owner: str, name: str) -> tuple[dict, bool, dict | Non
 
 
 def make_security_features_worker(owner: str, dry_run: bool):
-    def worker(repo: Repo) -> RepoResult:
-        repo_json, vuln_alerts_enabled, pvr_json = _fetch_security_state(
+    async def worker(repo: Repo) -> RepoResult:
+        repo_json, vuln_alerts_enabled, pvr_json = await _fetch_security_state(
             owner, repo.name
         )
         before_summary = security_summarize(
@@ -249,13 +266,13 @@ def make_security_features_worker(owner: str, dry_run: bool):
                 repo, security_dry_run_line(repo.name, before_summary, status), status
             )
 
-        api_json("PUT", f"/repos/{owner}/{repo.name}/vulnerability-alerts")
+        await api_json("PUT", f"/repos/{owner}/{repo.name}/vulnerability-alerts")
 
         unavailable = []
 
         # 422 = one or more of these fields isn't available on this plan
         # (GitHub Advanced Security is required for private repos).
-        security_response = api_request(
+        security_response = await api_request(
             "PATCH",
             f"/repos/{owner}/{repo.name}",
             json={
@@ -268,19 +285,19 @@ def make_security_features_worker(owner: str, dry_run: bool):
         )
         if security_response.status_code == 422:
             unavailable.append("secret scanning")
-        elif not security_response.ok:
+        elif not security_response.is_success:
             raise GhError(
                 error_message(security_response),
                 status_code=security_response.status_code,
             )
 
         # 404 = not available on this plan.
-        pvr_response = api_request(
+        pvr_response = await api_request(
             "PUT", f"/repos/{owner}/{repo.name}/private-vulnerability-reporting"
         )
         if pvr_response.status_code == 404:
             unavailable.append("private vulnerability reporting")
-        elif not pvr_response.ok:
+        elif not pvr_response.is_success:
             raise GhError(
                 error_message(pvr_response), status_code=pvr_response.status_code
             )
@@ -302,9 +319,11 @@ def make_security_features_worker(owner: str, dry_run: bool):
     return worker
 
 
-def cmd_security_features(args: argparse.Namespace) -> int:
-    repos = list_repos(DEFAULT_OWNER, only=as_set(args.only), skip=as_set(args.skip))
-    results = run_parallel(
+async def cmd_security_features(args: argparse.Namespace) -> int:
+    repos = await list_repos(
+        DEFAULT_OWNER, only=as_set(args.only), skip=as_set(args.skip)
+    )
+    results = await run_parallel(
         repos, make_security_features_worker(DEFAULT_OWNER, args.dry_run)
     )
 
@@ -394,8 +413,8 @@ def branch_protection_up_to_date(current: dict | None, contexts: list[str]) -> b
 _PR_SAMPLE_SIZE = "5"
 
 
-def _recent_pr_head_shas(owner: str, name: str) -> list[str]:
-    pulls = api_json(
+async def _recent_pr_head_shas(owner: str, name: str) -> list[str]:
+    pulls = await api_json(
         "GET",
         f"/repos/{owner}/{name}/pulls",
         params={
@@ -408,8 +427,8 @@ def _recent_pr_head_shas(owner: str, name: str) -> list[str]:
     return [pull["head"]["sha"] for pull in pulls]
 
 
-def _github_actions_check_runs(owner: str, name: str, sha: str) -> list[dict]:
-    data = api_json("GET", f"/repos/{owner}/{name}/commits/{sha}/check-runs")
+async def _github_actions_check_runs(owner: str, name: str, sha: str) -> list[dict]:
+    data = await api_json("GET", f"/repos/{owner}/{name}/commits/{sha}/check-runs")
     return [
         run
         for run in data["check_runs"]
@@ -417,7 +436,7 @@ def _github_actions_check_runs(owner: str, name: str, sha: str) -> list[dict]:
     ]
 
 
-def _check_run_contexts(owner: str, name: str, shas: list[str]) -> list[str]:
+async def _check_run_contexts(owner: str, name: str, shas: list[str]) -> list[str]:
     """Contexts to require, sampled from the most recent PR's head commit.
 
     A job that calls a reusable workflow via `uses:` alongside a `needs:`
@@ -431,7 +450,7 @@ def _check_run_contexts(owner: str, name: str, shas: list[str]) -> list[str]:
     alias ("<name> / ...") if one shows up, actually run, anywhere in a
     short recent-PR window.
     """
-    latest_runs = _github_actions_check_runs(owner, name, shas[0])
+    latest_runs = await _github_actions_check_runs(owner, name, shas[0])
     contexts = {run["name"] for run in latest_runs}
     suspect = {
         run["name"]
@@ -444,7 +463,7 @@ def _check_run_contexts(owner: str, name: str, shas: list[str]) -> list[str]:
     for sha in shas[1:]:
         if not suspect:
             break
-        for run in _github_actions_check_runs(owner, name, sha):
+        for run in await _github_actions_check_runs(owner, name, sha):
             if run["conclusion"] == "skipped":
                 continue
             base = run["name"].split(" / ", 1)[0]
@@ -463,27 +482,27 @@ def _plan_gated_result(repo: Repo, *, tag: Tag | None = None) -> RepoResult:
 
 
 def make_branch_protection_worker(owner: str, dry_run: bool):
-    def worker(repo: Repo) -> RepoResult:
+    async def worker(repo: Repo) -> RepoResult:
         # Contexts to require are derived from a recent PR's check runs when
         # available. Without any (a brand-new repo, or one that's only ever
         # been pushed to directly), the baseline protection -- PR required,
         # no force-push/deletion, admins enforced -- still applies; it just
         # can't gate on specific status checks yet. A later run picks up
         # contexts once a PR exists to sample them from.
-        pr_head_shas = _recent_pr_head_shas(owner, repo.name)
+        pr_head_shas = await _recent_pr_head_shas(owner, repo.name)
         contexts: list[str] = []
         pending_note = None
         if not pr_head_shas:
             pending_note = "no pull requests found yet, requiring none for now"
         else:
-            contexts = _check_run_contexts(owner, repo.name, pr_head_shas)
+            contexts = await _check_run_contexts(owner, repo.name, pr_head_shas)
             if not contexts:
                 pending_note = (
                     f"no check runs found on latest PR commit {pr_head_shas[0]}, "
                     "requiring none for now"
                 )
 
-        protection_response = api_request(
+        protection_response = await api_request(
             "GET",
             f"/repos/{owner}/{repo.name}/branches/{repo.default_branch}/protection",
         )
@@ -493,7 +512,7 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
             )
         if protection_response.status_code == 404:
             current = None
-        elif protection_response.ok:
+        elif protection_response.is_success:
             current = protection_response.json()
         else:
             raise GhError(
@@ -523,14 +542,14 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
             )
 
         payload = branch_protection_payload(contexts)
-        put_response = api_request(
+        put_response = await api_request(
             "PUT",
             f"/repos/{owner}/{repo.name}/branches/{repo.default_branch}/protection",
             json=payload,
         )
         if put_response.status_code == 403:
             return _plan_gated_result(repo, tag=Tag.SKIPPED_NO_PLAN)
-        if not put_response.ok:
+        if not put_response.is_success:
             raise GhError(
                 error_message(put_response), status_code=put_response.status_code
             )
@@ -542,9 +561,11 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
     return worker
 
 
-def cmd_branch_protection(args: argparse.Namespace) -> int:
-    repos = list_repos(DEFAULT_OWNER, only=as_set(args.only), skip=as_set(args.skip))
-    results = run_parallel(
+async def cmd_branch_protection(args: argparse.Namespace) -> int:
+    repos = await list_repos(
+        DEFAULT_OWNER, only=as_set(args.only), skip=as_set(args.skip)
+    )
+    results = await run_parallel(
         repos, make_branch_protection_worker(DEFAULT_OWNER, args.dry_run)
     )
 
@@ -577,7 +598,7 @@ def cmd_branch_protection(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
-def cmd_all(args: argparse.Namespace) -> int:
+async def cmd_all(args: argparse.Namespace) -> int:
     """Runs merge-settings, branch-protection, then security-features in
     that order (matching the README's ordering -- merge-settings' PR-branch
     auto-update makes branch-protection's auto-merge-friendly baseline
@@ -592,7 +613,7 @@ def cmd_all(args: argparse.Namespace) -> int:
     ):
         print(f"== {name} ==")
         try:
-            if cmd(args) != 0:
+            if await cmd(args) != 0:
                 failed = True
         except GhError as exc:
             print(exc, file=sys.stderr)
@@ -637,10 +658,17 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+async def _run(args: argparse.Namespace) -> int:
+    try:
+        return await args.func(args)
+    finally:
+        await lib.aclose_client()
+
+
 def main(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
     try:
-        return args.func(args)
+        return asyncio.run(_run(args))
     except GhError as exc:
         print(exc, file=sys.stderr)
         return 1

@@ -15,16 +15,16 @@ repo_admin.py.
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
+import asyncio
 import os
 import smtplib
 import sys
-import threading
 from datetime import UTC, datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 
+import lib
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from lib import (
     DEFAULT_JOBS,
@@ -75,13 +75,15 @@ def _normalize_release(repo_name: str, item: dict) -> dict:
     }
 
 
-def _ci_status(owner: str, name: str, sha: str) -> str:
+async def _ci_status(owner: str, name: str, sha: str) -> str:
     """Rolls a commit's check runs up into one summary: "no checks" if none
     exist, "pending" if any haven't completed, "failing" if any completed
     one failed, else "passing".
     """
-    response = api_request("GET", f"/repos/{owner}/{name}/commits/{sha}/check-runs")
-    if not response.ok:
+    response = await api_request(
+        "GET", f"/repos/{owner}/{name}/commits/{sha}/check-runs"
+    )
+    if not response.is_success:
         raise GhError(error_message(response), status_code=response.status_code)
     runs = response.json()["check_runs"]
     if not runs:
@@ -93,43 +95,44 @@ def _ci_status(owner: str, name: str, sha: str) -> str:
     return "passing"
 
 
-def _mergeable_status(owner: str, name: str, number: int) -> str:
+async def _mergeable_status(owner: str, name: str, number: int) -> str:
     """ "dirty" is GitHub's mergeable_state for an actual merge conflict;
     everything else (including null/"unknown" right after a push, before
     GitHub finishes computing it) is treated as clean rather than flagged.
     """
-    data = api_json("GET", f"/repos/{owner}/{name}/pulls/{number}")
+    data = await api_json("GET", f"/repos/{owner}/{name}/pulls/{number}")
     return "conflict" if data.get("mergeable_state") == "dirty" else "clean"
 
 
 class _GrowingTotal:
-    """A thread-safe counter for a Progress task's `total` that grows by one
-    each time a unit of work is discovered -- avoids `total=None`'s
-    indeterminate/pulsing bar, which never renders a finished 100% state.
-    Incrementing `total` right before the matching `progress.advance()` call
-    keeps total and completed in lockstep, so the bar naturally reaches
-    100% once the last unit finishes.
+    """A counter for a Progress task's `total` that grows by one each time a
+    unit of work is discovered -- avoids `total=None`'s indeterminate/pulsing
+    bar, which never renders a finished 100% state. Incrementing `total`
+    right before the matching `progress.advance()` call keeps total and
+    completed in lockstep, so the bar naturally reaches 100% once the last
+    unit finishes. No locking needed: asyncio is cooperatively single-
+    threaded and grow() contains no `await`, so it's already atomic between
+    task switches.
     """
 
     def __init__(self, progress: Progress, task: TaskID) -> None:
         self._progress = progress
         self._task = task
-        self._lock = threading.Lock()
         self._total = 0
 
     def grow(self) -> None:
-        with self._lock:
-            self._total += 1
-            self._progress.update(self._task, total=self._total)
+        self._total += 1
+        self._progress.update(self._task, total=self._total)
 
 
-def _fetch_repo_prs(
+async def _fetch_repo_prs(
     owner: str,
     name: str,
     since_updated: datetime,
     progress: Progress,
     task: TaskID,
     check_total: _GrowingTotal,
+    sem: asyncio.Semaphore,
 ) -> list[dict]:
     """Pages a repo's pull requests newest-updated-first, stopping as soon as
     a page's PRs were all last updated before `since_updated` -- no need to
@@ -138,25 +141,30 @@ def _fetch_repo_prs(
     bumps `updated_at`) is still picked up; render_html does the actual
     open/closed windowing.
 
-    Advances `task` after every open PR's CI/mergeable checks -- those are
-    the slow per-PR API calls, so a repo with many open PRs would otherwise
-    leave the bar looking stalled until the whole repo finishes.
+    Paging itself stays sequential (page N+1's URL/early-stop depends on
+    page N's content), but every open PR's CI/mergeable checks -- the slow
+    per-PR API calls -- are fired concurrently once paging finishes, bounded
+    by the same semaphore `fetch_prs` shares across every repo (so a run
+    with dozens of repos and many open PRs each doesn't fire hundreds of
+    requests at once).
     """
     prs = []
+    open_prs = []
     page = 1
     while True:
-        response = api_request(
-            "GET",
-            f"/repos/{owner}/{name}/pulls",
-            params={
-                "state": "all",
-                "sort": "updated",
-                "direction": "desc",
-                "per_page": _PER_PAGE,
-                "page": str(page),
-            },
-        )
-        if not response.ok:
+        async with sem:
+            response = await api_request(
+                "GET",
+                f"/repos/{owner}/{name}/pulls",
+                params={
+                    "state": "all",
+                    "sort": "updated",
+                    "direction": "desc",
+                    "per_page": _PER_PAGE,
+                    "page": str(page),
+                },
+            )
+        if not response.is_success:
             raise GhError(error_message(response), status_code=response.status_code)
         items = response.json()
         if not items:
@@ -170,57 +178,67 @@ def _fetch_repo_prs(
             pr = _normalize_pr(name, item)
             if pr["state"] == "open":
                 check_total.grow()
-                pr["ci_status"] = _ci_status(owner, name, item["head"]["sha"])
-                pr["mergeable"] = _mergeable_status(owner, name, pr["number"])
-                progress.advance(task)
+                pr["_head_sha"] = item["head"]["sha"]
+                open_prs.append(pr)
             prs.append(pr)
 
         if page_exhausted or len(items) < int(_PER_PAGE):
             break
         page += 1
+
+    async def check_one(pr: dict) -> None:
+        async with sem:
+            pr["ci_status"] = await _ci_status(owner, name, pr.pop("_head_sha"))
+            pr["mergeable"] = await _mergeable_status(owner, name, pr["number"])
+            progress.advance(task)
+
+    if open_prs:
+        await asyncio.gather(*(check_one(pr) for pr in open_prs))
+
     return prs
 
 
-def fetch_prs(
-    owner: str, repos: list[Repo], since_updated: datetime, jobs: int = DEFAULT_JOBS
+async def fetch_prs(
+    owner: str,
+    repos: list[Repo],
+    since_updated: datetime,
+    jobs: int = DEFAULT_JOBS,
+    sem: asyncio.Semaphore | None = None,
 ) -> list[dict]:
     """Fetches every repo concurrently -- these are I/O-bound network calls
     (one repo's fetch doesn't depend on another's), and with dozens of repos
-    doing them serially dominates the script's runtime. lib.py's requests
-    Session is thread-local specifically to support this.
+    doing them serially dominates the script's runtime.
 
     Two bars: repos fetched (as before), plus a growing counter of open PRs
     CI/mergeable-checked -- those per-PR calls are the slow part, so a repo
     with many open PRs no longer looks stalled until it finishes.
+
+    `sem` is optional so this stays independently callable/testable; main()
+    passes one shared with fetch_releases so the two together stay capped at
+    `jobs` concurrent requests, not `2 * jobs`.
     """
+    sem = sem or asyncio.Semaphore(jobs)
     prs = []
-    with (
-        concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool,
-        Progress(disable=not sys.stdout.isatty()) as progress,
-    ):
+    with Progress(disable=not sys.stdout.isatty()) as progress:
         repo_task = progress.add_task("Fetching PRs...", total=len(repos))
         check_task = progress.add_task("Checking open PR status...", total=0)
         check_total = _GrowingTotal(progress, check_task)
-        futures = [
-            pool.submit(
-                _fetch_repo_prs,
-                owner,
-                repo.name,
-                since_updated,
-                progress,
-                check_task,
-                check_total,
+
+        async def run_one(repo: Repo) -> list[dict]:
+            result = await _fetch_repo_prs(
+                owner, repo.name, since_updated, progress, check_task, check_total, sem
             )
-            for repo in repos
-        ]
-        for future in concurrent.futures.as_completed(futures):
-            prs.extend(future.result())
             progress.advance(repo_task)
+            return result
+
+        results = await asyncio.gather(*(run_one(repo) for repo in repos))
+    for result in results:
+        prs.extend(result)
     return prs
 
 
-def _fetch_repo_releases(
-    owner: str, name: str, since_published: datetime
+async def _fetch_repo_releases(
+    owner: str, name: str, since_published: datetime, sem: asyncio.Semaphore
 ) -> list[dict]:
     """Pages a repo's releases newest-first (GitHub's default order), stopping
     as soon as a page's releases were all published before `since_published`.
@@ -230,12 +248,13 @@ def _fetch_repo_releases(
     releases = []
     page = 1
     while True:
-        response = api_request(
-            "GET",
-            f"/repos/{owner}/{name}/releases",
-            params={"per_page": _PER_PAGE, "page": str(page)},
-        )
-        if not response.ok:
+        async with sem:
+            response = await api_request(
+                "GET",
+                f"/repos/{owner}/{name}/releases",
+                params={"per_page": _PER_PAGE, "page": str(page)},
+            )
+        if not response.is_success:
             raise GhError(error_message(response), status_code=response.status_code)
         items = response.json()
         if not items:
@@ -256,23 +275,27 @@ def _fetch_repo_releases(
     return releases
 
 
-def fetch_releases(
-    owner: str, repos: list[Repo], since_published: datetime, jobs: int = DEFAULT_JOBS
+async def fetch_releases(
+    owner: str,
+    repos: list[Repo],
+    since_published: datetime,
+    jobs: int = DEFAULT_JOBS,
+    sem: asyncio.Semaphore | None = None,
 ) -> list[dict]:
     """Fetches every repo's releases concurrently, mirroring fetch_prs."""
+    sem = sem or asyncio.Semaphore(jobs)
     releases = []
-    with (
-        concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool,
-        Progress(disable=not sys.stdout.isatty()) as progress,
-    ):
+    with Progress(disable=not sys.stdout.isatty()) as progress:
         task = progress.add_task("Fetching releases...", total=len(repos))
-        futures = [
-            pool.submit(_fetch_repo_releases, owner, repo.name, since_published)
-            for repo in repos
-        ]
-        for future in concurrent.futures.as_completed(futures):
-            releases.extend(future.result())
+
+        async def run_one(repo: Repo) -> list[dict]:
+            result = await _fetch_repo_releases(owner, repo.name, since_published, sem)
             progress.advance(task)
+            return result
+
+        results = await asyncio.gather(*(run_one(repo) for repo in repos))
+    for result in results:
+        releases.extend(result)
     return releases
 
 
@@ -395,28 +418,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str]) -> int:
-    args = build_parser().parse_args(argv)
-
+async def _main_async(args: argparse.Namespace) -> int:
     until = datetime.now(UTC)
     since_open = until - timedelta(days=args.open_days)
     since_closed = until - timedelta(days=args.closed_days)
     since_release = until - timedelta(days=args.release_days)
     since_fetch = min(since_open, since_closed, since_release)
 
-    repos = list_repos(DEFAULT_OWNER)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        prs_future = pool.submit(fetch_prs, DEFAULT_OWNER, repos, since_fetch)
-        releases_future = pool.submit(fetch_releases, DEFAULT_OWNER, repos, since_fetch)
-        prs = prs_future.result()
-        releases = releases_future.result()
+    repos = await list_repos(DEFAULT_OWNER)
+    sem = asyncio.Semaphore(DEFAULT_JOBS)
+    prs, releases = await asyncio.gather(
+        fetch_prs(DEFAULT_OWNER, repos, since_fetch, sem=sem),
+        fetch_releases(DEFAULT_OWNER, repos, since_fetch, sem=sem),
+    )
     rendered = render_html(
         prs, releases, since_open, since_closed, since_release, until
     )
 
     if args.out:
-        with open(args.out, "w") as f:
-            f.write(rendered)
+        await asyncio.to_thread(Path(args.out).write_text, rendered)
 
     if not args.no_send:
         send_email(
@@ -430,6 +450,18 @@ def main(argv: list[str]) -> int:
             subject=f"PR digest: {_format_date(until)}",
         )
     return 0
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+
+    async def _run() -> int:
+        try:
+            return await _main_async(args)
+        finally:
+            await lib.aclose_client()
+
+    return asyncio.run(_run())
 
 
 if __name__ == "__main__":

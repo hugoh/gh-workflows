@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-import concurrent.futures
+import asyncio
 import enum
 import os
 import subprocess
 import sys
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import requests
+import httpx
 from rich.console import Console
 from rich.progress import Progress
 
@@ -21,7 +20,7 @@ API_BASE = "https://api.github.com"
 DEFAULT_OWNER = os.environ.get("GH_OWNER", "hugoh")
 DEFAULT_JOBS = int(os.environ.get("GH_JOBS", "6"))
 
-_console = Console()
+console = Console()
 
 
 class Status(enum.Enum):
@@ -71,7 +70,7 @@ def print_status(status: Status, line: str) -> None:
     # highlight=False: rich's default ReprHighlighter recolors numbers,
     # paths, etc. within the line (e.g. a repo named "foo-410"), fighting
     # with the single status color we want for the whole line.
-    _console.print(f"{symbol} {line}", style=color, markup=False, highlight=False)
+    console.print(f"{symbol} {line}", style=color, markup=False, highlight=False)
 
 
 class GhError(RuntimeError):
@@ -100,32 +99,38 @@ def _auth_token() -> str:
     return result.stdout.strip()
 
 
-_local = threading.local()
+_client: httpx.AsyncClient | None = None
+_client_lock = asyncio.Lock()
 
 
-def _session() -> requests.Session:
-    # Thread-local rather than one shared Session: requests.Session doesn't
-    # document thread-safety guarantees, and run_parallel calls into this
-    # from a thread pool. Each worker thread pays the `gh auth token`
-    # subprocess cost once, then reuses its own session for every repo it
-    # handles.
-    session = getattr(_local, "session", None)
-    if session is None:
-        session = requests.Session()
-        session.headers.update(
-            {
-                "Authorization": f"Bearer {_auth_token()}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            }
-        )
-        _local.session = session
-    return session
+async def _get_client() -> httpx.AsyncClient:
+    # One shared AsyncClient rather than one per thread: there's no longer a
+    # thread pool, and gh auth token only needs to be paid once per process.
+    global _client
+    if _client is None:
+        async with _client_lock:
+            if _client is None:
+                _client = httpx.AsyncClient(
+                    headers={
+                        "Authorization": f"Bearer {_auth_token()}",
+                        "Accept": "application/vnd.github+json",
+                        "X-GitHub-Api-Version": "2022-11-28",
+                    },
+                    timeout=30,
+                )
+    return _client
 
 
-def api_request(
+async def aclose_client() -> None:
+    global _client
+    if _client is not None:
+        await _client.aclose()
+        _client = None
+
+
+async def api_request(
     method: str, path: str, *, json: Any = None, params: dict | None = None
-) -> requests.Response:
+) -> httpx.Response:
     """Makes one GitHub REST API call and returns the raw Response --
     callers decide what a given status means for their endpoint (e.g. a 404
     means "feature disabled" for vulnerability-alerts but "not found"
@@ -134,13 +139,14 @@ def api_request(
     raised.
     """
     url = path if path.startswith("http") else f"{API_BASE}{path}"
+    client = await _get_client()
     try:
-        return _session().request(method, url, json=json, params=params, timeout=30)
-    except requests.RequestException as exc:
+        return await client.request(method, url, json=json, params=params)
+    except httpx.HTTPError as exc:
         raise GhError(str(exc)) from exc
 
 
-def error_message(response: requests.Response) -> str:
+def error_message(response: httpx.Response) -> str:
     """Extracts GitHub's own `message` field from an error response body,
     falling back to the raw response text if the body isn't JSON.
     """
@@ -150,15 +156,15 @@ def error_message(response: requests.Response) -> str:
         return response.text
 
 
-def api_json(
+async def api_json(
     method: str, path: str, *, json: Any = None, params: dict | None = None
 ) -> dict:
     """Like api_request, but raises GhError (with status_code and GitHub's
     own error message) on any non-2xx response, and returns the parsed JSON
     body -- or {} for a body-less response like 204 No Content -- on success.
     """
-    response = api_request(method, path, json=json, params=params)
-    if not response.ok:
+    response = await api_request(method, path, json=json, params=params)
+    if not response.is_success:
         raise GhError(error_message(response), status_code=response.status_code)
     return response.json() if response.content else {}
 
@@ -179,13 +185,15 @@ class RepoResult:
     tag: str | None = None
 
 
-def _paginated(method: str, path: str, *, params: dict | None = None) -> list[dict]:
+async def _paginated(
+    method: str, path: str, *, params: dict | None = None
+) -> list[dict]:
     items = []
     url = path
     query = params
     while url:
-        response = api_request(method, url, params=query)
-        if not response.ok:
+        response = await api_request(method, url, params=query)
+        if not response.is_success:
             raise GhError(error_message(response), status_code=response.status_code)
         items.extend(response.json())
         url = response.links.get("next", {}).get("url")
@@ -193,17 +201,17 @@ def _paginated(method: str, path: str, *, params: dict | None = None) -> list[di
     return items
 
 
-def fetch_repos_json(owner: str) -> list[dict]:
+async def fetch_repos_json(owner: str) -> list[dict]:
     """Lists every repo for `owner`. When `owner` is the authenticated `gh`
     user, uses /user/repos so private repos are included; otherwise falls
     back to /users/{owner}/repos, which only ever returns public repos.
     """
-    viewer = api_json("GET", "/user").get("login")
+    viewer = (await api_json("GET", "/user")).get("login")
     if owner == viewer:
-        return _paginated(
+        return await _paginated(
             "GET", "/user/repos", params={"affiliation": "owner", "per_page": "100"}
         )
-    return _paginated("GET", f"/users/{owner}/repos", params={"per_page": "100"})
+    return await _paginated("GET", f"/users/{owner}/repos", params={"per_page": "100"})
 
 
 def default_include_forks() -> set[str]:
@@ -268,7 +276,7 @@ def filter_repos(
     return repos
 
 
-def list_repos(
+async def list_repos(
     owner: str = DEFAULT_OWNER,
     *,
     only: set[str] | None = None,
@@ -277,7 +285,7 @@ def list_repos(
 ) -> list[Repo]:
     if include_forks is None:
         include_forks = default_include_forks()
-    repos_json = fetch_repos_json(owner)
+    repos_json = await fetch_repos_json(owner)
     for name in sorted(unmatched_include_forks(include_forks, repos_json)):
         print(
             f"warning: include-forks entry {name!r} doesn't match any repo",
@@ -292,43 +300,45 @@ def as_set(value: str | None) -> set[str] | None:
     return {v.strip() for v in value.split(",") if v.strip()}
 
 
-def run_parallel(
+async def run_parallel(
     repos: list[Repo], worker, jobs: int = DEFAULT_JOBS
 ) -> list[RepoResult]:
-    """Runs worker(repo) for each repo concurrently (a thread pool -- these
-    are I/O-bound `gh`/network calls, not CPU-bound work), printing each
-    result's line as soon as it's ready (completion order, not submission
-    order) above a live progress bar, and returning every RepoResult.
+    """Runs worker(repo) for each repo concurrently (bounded by a semaphore
+    -- these are I/O-bound `gh`/network calls, not CPU-bound work), printing
+    each result's line as soon as it's ready (completion order, not
+    submission order) above a live progress bar, and returning every
+    RepoResult.
 
-    A worker exception is caught, printed as a failure line, and doesn't
-    stop the other repos from running -- but once every repo has been
-    attempted, any failures are raised together as a single GhError so
-    the run still ends
-    with a nonzero exit.
+    A worker exception is caught inside call() itself -- not left to
+    propagate through the TaskGroup -- so one repo failing doesn't cancel
+    the others (TaskGroup cancels every sibling task the moment any task
+    raises). Instead it's printed as a failure line and collected; once
+    every repo has been attempted, any failures are raised together as a
+    single GhError so the run still ends with a nonzero exit.
     """
-    results = []
-    failed_names = []
-    print_lock = threading.Lock()
+    results: list[RepoResult] = []
+    failed_names: list[str] = []
+    sem = asyncio.Semaphore(jobs)
 
-    def call(repo: Repo) -> RepoResult:
-        result = worker(repo)
-        with print_lock:
-            print_status(result.status, result.line)
-        return result
-
-    with Progress(console=_console) as progress:
+    with Progress(console=console) as progress:
         task = progress.add_task("Processing repos...", total=len(repos))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
-            futures = {pool.submit(call, repo): repo for repo in repos}
-            for future in concurrent.futures.as_completed(futures):
-                repo = futures[future]
+
+        async def call(repo: Repo) -> None:
+            async with sem:
                 try:
-                    results.append(future.result())
+                    result = await worker(repo)
                 except Exception as exc:  # noqa: BLE001 -- collected below, not swallowed
                     failed_names.append(repo.name)
-                    with print_lock:
-                        print_status(Status.FAILED, f"{repo.name}: {exc}")
-                progress.advance(task)
+                    print_status(Status.FAILED, f"{repo.name}: {exc}")
+                else:
+                    print_status(result.status, result.line)
+                    results.append(result)
+                finally:
+                    progress.advance(task)
+
+        async with asyncio.TaskGroup() as tg:
+            for repo in repos:
+                tg.create_task(call(repo))
 
     if failed_names:
         raise GhError(
