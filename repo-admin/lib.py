@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 from rich.console import Console
 from rich.progress import Progress
 
@@ -99,18 +99,18 @@ def _auth_token() -> str:
     return result.stdout.strip()
 
 
-_client: httpx.AsyncClient | None = None
+_client: httpx2.AsyncClient | None = None
 _client_lock = asyncio.Lock()
 
 
-async def _get_client() -> httpx.AsyncClient:
+async def _get_client() -> httpx2.AsyncClient:
     # One shared AsyncClient rather than one per thread: there's no longer a
     # thread pool, and gh auth token only needs to be paid once per process.
     global _client
     if _client is None:
         async with _client_lock:
             if _client is None:
-                _client = httpx.AsyncClient(
+                _client = httpx2.AsyncClient(
                     headers={
                         "Authorization": f"Bearer {_auth_token()}",
                         "Accept": "application/vnd.github+json",
@@ -130,7 +130,7 @@ async def aclose_client() -> None:
 
 async def api_request(
     method: str, path: str, *, json: Any = None, params: dict | None = None
-) -> httpx.Response:
+) -> httpx2.Response:
     """Makes one GitHub REST API call and returns the raw Response --
     callers decide what a given status means for their endpoint (e.g. a 404
     means "feature disabled" for vulnerability-alerts but "not found"
@@ -142,11 +142,11 @@ async def api_request(
     client = await _get_client()
     try:
         return await client.request(method, url, json=json, params=params)
-    except httpx.HTTPError as exc:
+    except httpx2.HTTPError as exc:
         raise GhError(str(exc)) from exc
 
 
-def error_message(response: httpx.Response) -> str:
+def error_message(response: httpx2.Response) -> str:
     """Extracts GitHub's own `message` field from an error response body,
     falling back to the raw response text if the body isn't JSON.
     """

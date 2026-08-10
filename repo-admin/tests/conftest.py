@@ -9,7 +9,7 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _reset_http_client():
-    # httpx.AsyncClient is bound to the event loop it was created under, and
+    # httpx2.AsyncClient is bound to the event loop it was created under, and
     # pytest-asyncio's default function-scoped loop means a client surviving
     # across tests would raise "attached to a different loop" errors.
     lib._client = None
