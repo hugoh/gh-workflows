@@ -261,18 +261,18 @@ def fake_auth_token(monkeypatch):
     monkeypatch.setattr("lib._auth_token", lambda: "fake-token")
 
 
-@respx.mock
-async def test_error_message_prefers_json_message_field():
-    respx.get(f"{API_BASE}/x").mock(
+async def test_error_message_prefers_json_message_field(httpx2_mock: respx.Router):
+    httpx2_mock.get(f"{API_BASE}/x").mock(
         return_value=httpx.Response(404, json={"message": "not found"})
     )
     response = await api_request("GET", "/x")
     assert error_message(response) == "not found"
 
 
-@respx.mock
-async def test_error_message_falls_back_to_raw_text_for_non_json_body():
-    respx.get(f"{API_BASE}/x").mock(
+async def test_error_message_falls_back_to_raw_text_for_non_json_body(
+    httpx2_mock: respx.Router,
+):
+    httpx2_mock.get(f"{API_BASE}/x").mock(
         return_value=httpx.Response(
             500, text="plain text error", headers={"Content-Type": "text/plain"}
         )
@@ -281,9 +281,8 @@ async def test_error_message_falls_back_to_raw_text_for_non_json_body():
     assert error_message(response) == "plain text error"
 
 
-@respx.mock
-async def test_api_json_returns_parsed_body_on_success():
-    respx.get(f"{API_BASE}/repos/hugoh/gh-workflows").mock(
+async def test_api_json_returns_parsed_body_on_success(httpx2_mock: respx.Router):
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/gh-workflows").mock(
         return_value=httpx.Response(200, json={"name": "gh-workflows"})
     )
     assert await api_json("GET", "/repos/hugoh/gh-workflows") == {
@@ -291,9 +290,10 @@ async def test_api_json_returns_parsed_body_on_success():
     }
 
 
-@respx.mock
-async def test_api_json_raises_gh_error_with_status_code_on_failure():
-    respx.get(f"{API_BASE}/repos/hugoh/nope").mock(
+async def test_api_json_raises_gh_error_with_status_code_on_failure(
+    httpx2_mock: respx.Router,
+):
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/nope").mock(
         return_value=httpx.Response(404, json={"message": "Not Found"})
     )
     with pytest.raises(GhError) as exc_info:
@@ -302,17 +302,17 @@ async def test_api_json_raises_gh_error_with_status_code_on_failure():
     assert "Not Found" in str(exc_info.value)
 
 
-@respx.mock
-async def test_api_json_handles_empty_204_response():
-    respx.put(f"{API_BASE}/repos/hugoh/gh-workflows/vulnerability-alerts").mock(
+async def test_api_json_handles_empty_204_response(httpx2_mock: respx.Router):
+    httpx2_mock.put(f"{API_BASE}/repos/hugoh/gh-workflows/vulnerability-alerts").mock(
         return_value=httpx.Response(204)
     )
     assert await api_json("PUT", "/repos/hugoh/gh-workflows/vulnerability-alerts") == {}
 
 
-@respx.mock
-async def test_api_request_does_not_raise_on_http_error_status():
-    respx.get(
+async def test_api_request_does_not_raise_on_http_error_status(
+    httpx2_mock: respx.Router,
+):
+    httpx2_mock.get(
         f"{API_BASE}/repos/hugoh/private-repo/private-vulnerability-reporting"
     ).mock(return_value=httpx.Response(404))
     response = await api_request(
@@ -321,41 +321,44 @@ async def test_api_request_does_not_raise_on_http_error_status():
     assert response.status_code == 404
 
 
-@respx.mock
-async def test_fetch_repos_json_uses_authenticated_user_repos_when_owner_matches():
-    respx.get(f"{API_BASE}/user").mock(
+async def test_fetch_repos_json_uses_authenticated_user_repos_when_owner_matches(
+    httpx2_mock: respx.Router,
+):
+    httpx2_mock.get(f"{API_BASE}/user").mock(
         return_value=httpx.Response(200, json={"login": "hugoh"})
     )
-    respx.get(f"{API_BASE}/user/repos").mock(
+    httpx2_mock.get(f"{API_BASE}/user/repos").mock(
         return_value=httpx.Response(200, json=[{"name": "a"}])
     )
     assert await fetch_repos_json("hugoh") == [{"name": "a"}]
 
 
-@respx.mock
-async def test_fetch_repos_json_falls_back_to_public_repos_for_other_owners():
-    respx.get(f"{API_BASE}/user").mock(
+async def test_fetch_repos_json_falls_back_to_public_repos_for_other_owners(
+    httpx2_mock: respx.Router,
+):
+    httpx2_mock.get(f"{API_BASE}/user").mock(
         return_value=httpx.Response(200, json={"login": "hugoh"})
     )
-    respx.get(f"{API_BASE}/users/someorg/repos").mock(
+    httpx2_mock.get(f"{API_BASE}/users/someorg/repos").mock(
         return_value=httpx.Response(200, json=[{"name": "b"}])
     )
     assert await fetch_repos_json("someorg") == [{"name": "b"}]
 
 
-@respx.mock
-async def test_fetch_repos_json_follows_pagination_link_header():
-    respx.get(f"{API_BASE}/user").mock(
+async def test_fetch_repos_json_follows_pagination_link_header(
+    httpx2_mock: respx.Router,
+):
+    httpx2_mock.get(f"{API_BASE}/user").mock(
         return_value=httpx.Response(200, json={"login": "hugoh"})
     )
     # respx routes are tried in registration order and a route with no
     # `params` constraint matches any query string -- the page=2 route must
     # be registered first, or the unconstrained page-1 route below would
     # swallow it too and _paginated would loop on page1 forever.
-    respx.get(f"{API_BASE}/user/repos", params={"page": "2"}).mock(
+    httpx2_mock.get(f"{API_BASE}/user/repos", params={"page": "2"}).mock(
         return_value=httpx.Response(200, json=[{"name": "page2"}])
     )
-    respx.get(f"{API_BASE}/user/repos").mock(
+    httpx2_mock.get(f"{API_BASE}/user/repos").mock(
         return_value=httpx.Response(
             200,
             json=[{"name": "page1"}],

@@ -44,13 +44,18 @@ def _pr(
 
 
 def _mock_open_pr_extras(
-    repo="repo-a", number=1, sha=None, check_runs=None, mergeable_state="clean"
+    httpx2_mock: respx.Router,
+    repo="repo-a",
+    number=1,
+    sha=None,
+    check_runs=None,
+    mergeable_state="clean",
 ):
     """Open PRs get two extra fetches (CI status, mergeable state) that
     closed PRs skip -- mock both for a given repo/PR/sha.
     """
     sha = sha or f"sha{number}"
-    respx.get(f"{API_BASE}/repos/hugoh/{repo}/commits/{sha}/check-runs").mock(
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/{repo}/commits/{sha}/check-runs").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -58,7 +63,7 @@ def _mock_open_pr_extras(
             },
         )
     )
-    respx.get(f"{API_BASE}/repos/hugoh/{repo}/pulls/{number}").mock(
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/{repo}/pulls/{number}").mock(
         return_value=httpx.Response(200, json={"mergeable_state": mergeable_state})
     )
 
@@ -83,14 +88,13 @@ def fake_auth_token(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-@respx.mock
-async def test_fetch_prs_normalizes_fields():
-    respx.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
+async def test_fetch_prs_normalizes_fields(httpx2_mock: respx.Router):
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
         return_value=httpx.Response(
             200, json=[_pr(number=5, title="Fix bug", login="hugoh")]
         )
     )
-    _mock_open_pr_extras(number=5)
+    _mock_open_pr_extras(httpx2_mock, number=5)
     prs = await fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
     assert prs == [
         {
@@ -109,9 +113,8 @@ async def test_fetch_prs_normalizes_fields():
     ]
 
 
-@respx.mock
-async def test_fetch_prs_excludes_prs_updated_before_since():
-    respx.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
+async def test_fetch_prs_excludes_prs_updated_before_since(httpx2_mock: respx.Router):
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
         return_value=httpx.Response(
             200,
             json=[
@@ -120,14 +123,15 @@ async def test_fetch_prs_excludes_prs_updated_before_since():
             ],
         )
     )
-    _mock_open_pr_extras(number=2)
+    _mock_open_pr_extras(httpx2_mock, number=2)
     prs = await fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
     assert [pr["number"] for pr in prs] == [2]
 
 
-@respx.mock
-async def test_fetch_prs_includes_pr_opened_before_since_but_updated_after():
-    respx.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
+async def test_fetch_prs_includes_pr_opened_before_since_but_updated_after(
+    httpx2_mock: respx.Router,
+):
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
         return_value=httpx.Response(
             200,
             json=[
@@ -146,9 +150,8 @@ async def test_fetch_prs_includes_pr_opened_before_since_but_updated_after():
     assert [pr["number"] for pr in prs] == [1]
 
 
-@respx.mock
-async def test_fetch_prs_merged_true_when_merged_at_set():
-    respx.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
+async def test_fetch_prs_merged_true_when_merged_at_set(httpx2_mock: respx.Router):
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
         return_value=httpx.Response(
             200,
             json=[
@@ -164,9 +167,10 @@ async def test_fetch_prs_merged_true_when_merged_at_set():
     assert prs[0]["merged"] is True
 
 
-@respx.mock
-async def test_fetch_prs_merged_false_when_closed_without_merge():
-    respx.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
+async def test_fetch_prs_merged_false_when_closed_without_merge(
+    httpx2_mock: respx.Router,
+):
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
         return_value=httpx.Response(
             200,
             json=[
@@ -178,27 +182,27 @@ async def test_fetch_prs_merged_false_when_closed_without_merge():
     assert prs[0]["merged"] is False
 
 
-@respx.mock
-async def test_fetch_prs_stops_paginating_once_page_is_entirely_older_than_since():
-    respx.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
+async def test_fetch_prs_stops_paginating_once_page_is_entirely_older_than_since(
+    httpx2_mock: respx.Router,
+):
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
         return_value=httpx.Response(
             200, json=[_pr(number=1, created_at="2026-07-01T00:00:00Z")]
         )
     )
     await fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
-    assert len(respx.calls) == 1
+    assert len(httpx2_mock.calls) == 1
 
 
-@respx.mock
-async def test_fetch_prs_combines_multiple_repos():
-    respx.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
+async def test_fetch_prs_combines_multiple_repos(httpx2_mock: respx.Router):
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
         return_value=httpx.Response(200, json=[_pr(number=1)])
     )
-    respx.get(f"{API_BASE}/repos/hugoh/repo-b/pulls").mock(
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-b/pulls").mock(
         return_value=httpx.Response(200, json=[_pr(number=2)])
     )
-    _mock_open_pr_extras(repo="repo-a", number=1)
-    _mock_open_pr_extras(repo="repo-b", number=2)
+    _mock_open_pr_extras(httpx2_mock, repo="repo-a", number=1)
+    _mock_open_pr_extras(httpx2_mock, repo="repo-b", number=2)
     prs = await fetch_prs("hugoh", [REPO_A, REPO_B], SINCE_OPEN)
     assert sorted((pr["repo"], pr["number"]) for pr in prs) == [
         ("repo-a", 1),
@@ -228,9 +232,8 @@ def _release(
     }
 
 
-@respx.mock
-async def test_fetch_releases_normalizes_fields():
-    respx.get(f"{API_BASE}/repos/hugoh/repo-a/releases").mock(
+async def test_fetch_releases_normalizes_fields(httpx2_mock: respx.Router):
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/releases").mock(
         return_value=httpx.Response(
             200, json=[_release(tag_name="v2.0.0", name="Version 2.0.0")]
         )
@@ -248,36 +251,36 @@ async def test_fetch_releases_normalizes_fields():
     ]
 
 
-@respx.mock
-async def test_fetch_releases_falls_back_to_tag_name_when_name_blank():
-    respx.get(f"{API_BASE}/repos/hugoh/repo-a/releases").mock(
+async def test_fetch_releases_falls_back_to_tag_name_when_name_blank(
+    httpx2_mock: respx.Router,
+):
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/releases").mock(
         return_value=httpx.Response(200, json=[_release(tag_name="v2.0.0", name="")])
     )
     releases = await fetch_releases("hugoh", [REPO_A], SINCE_RELEASE)
     assert releases[0]["name"] == "v2.0.0"
 
 
-@respx.mock
-async def test_fetch_releases_excludes_drafts():
-    respx.get(f"{API_BASE}/repos/hugoh/repo-a/releases").mock(
+async def test_fetch_releases_excludes_drafts(httpx2_mock: respx.Router):
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/releases").mock(
         return_value=httpx.Response(200, json=[_release(draft=True, published_at=None)])
     )
     releases = await fetch_releases("hugoh", [REPO_A], SINCE_RELEASE)
     assert releases == []
 
 
-@respx.mock
-async def test_fetch_releases_marks_prerelease():
-    respx.get(f"{API_BASE}/repos/hugoh/repo-a/releases").mock(
+async def test_fetch_releases_marks_prerelease(httpx2_mock: respx.Router):
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/releases").mock(
         return_value=httpx.Response(200, json=[_release(prerelease=True)])
     )
     releases = await fetch_releases("hugoh", [REPO_A], SINCE_RELEASE)
     assert releases[0]["prerelease"] is True
 
 
-@respx.mock
-async def test_fetch_releases_excludes_releases_published_before_since():
-    respx.get(f"{API_BASE}/repos/hugoh/repo-a/releases").mock(
+async def test_fetch_releases_excludes_releases_published_before_since(
+    httpx2_mock: respx.Router,
+):
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/releases").mock(
         return_value=httpx.Response(
             200,
             json=[
@@ -290,23 +293,23 @@ async def test_fetch_releases_excludes_releases_published_before_since():
     assert [r["tag_name"] for r in releases] == ["v2.0.0"]
 
 
-@respx.mock
-async def test_fetch_releases_stops_paginating_once_page_is_entirely_older_than_since():
-    respx.get(f"{API_BASE}/repos/hugoh/repo-a/releases").mock(
+async def test_fetch_releases_stops_paginating_once_page_is_entirely_older_than_since(
+    httpx2_mock: respx.Router,
+):
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/releases").mock(
         return_value=httpx.Response(
             200, json=[_release(published_at="2026-07-01T10:00:00Z")]
         )
     )
     await fetch_releases("hugoh", [REPO_A], SINCE_RELEASE)
-    assert len(respx.calls) == 1
+    assert len(httpx2_mock.calls) == 1
 
 
-@respx.mock
-async def test_fetch_releases_combines_multiple_repos():
-    respx.get(f"{API_BASE}/repos/hugoh/repo-a/releases").mock(
+async def test_fetch_releases_combines_multiple_repos(httpx2_mock: respx.Router):
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/releases").mock(
         return_value=httpx.Response(200, json=[_release(tag_name="v1.0.0")])
     )
-    respx.get(f"{API_BASE}/repos/hugoh/repo-b/releases").mock(
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-b/releases").mock(
         return_value=httpx.Response(200, json=[_release(tag_name="v2.0.0")])
     )
     releases = await fetch_releases("hugoh", [REPO_A, REPO_B], SINCE_RELEASE)
@@ -319,24 +322,29 @@ async def test_fetch_releases_combines_multiple_repos():
 # ---------------------------------------------------------------------------
 
 
-@respx.mock
-async def test_fetch_prs_ci_status_pending_when_a_check_is_not_completed():
-    respx.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
+async def test_fetch_prs_ci_status_pending_when_a_check_is_not_completed(
+    httpx2_mock: respx.Router,
+):
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
         return_value=httpx.Response(200, json=[_pr(number=1)])
     )
     _mock_open_pr_extras(
-        number=1, check_runs=[_check_run(status="in_progress", conclusion=None)]
+        httpx2_mock,
+        number=1,
+        check_runs=[_check_run(status="in_progress", conclusion=None)],
     )
     prs = await fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
     assert prs[0]["ci_status"] == "pending"
 
 
-@respx.mock
-async def test_fetch_prs_ci_status_failing_when_a_check_failed():
-    respx.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
+async def test_fetch_prs_ci_status_failing_when_a_check_failed(
+    httpx2_mock: respx.Router,
+):
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
         return_value=httpx.Response(200, json=[_pr(number=1)])
     )
     _mock_open_pr_extras(
+        httpx2_mock,
         number=1,
         check_runs=[_check_run(), _check_run(conclusion="failure")],
     )
@@ -344,35 +352,34 @@ async def test_fetch_prs_ci_status_failing_when_a_check_failed():
     assert prs[0]["ci_status"] == "failing"
 
 
-@respx.mock
-async def test_fetch_prs_ci_status_no_checks_when_no_check_runs():
-    respx.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
+async def test_fetch_prs_ci_status_no_checks_when_no_check_runs(
+    httpx2_mock: respx.Router,
+):
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
         return_value=httpx.Response(200, json=[_pr(number=1)])
     )
-    _mock_open_pr_extras(number=1, check_runs=[])
+    _mock_open_pr_extras(httpx2_mock, number=1, check_runs=[])
     prs = await fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
     assert prs[0]["ci_status"] == "no checks"
 
 
-@respx.mock
-async def test_fetch_prs_mergeable_conflict_when_dirty():
-    respx.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
+async def test_fetch_prs_mergeable_conflict_when_dirty(httpx2_mock: respx.Router):
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
         return_value=httpx.Response(200, json=[_pr(number=1)])
     )
-    _mock_open_pr_extras(number=1, mergeable_state="dirty")
+    _mock_open_pr_extras(httpx2_mock, number=1, mergeable_state="dirty")
     prs = await fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
     assert prs[0]["mergeable"] == "conflict"
 
 
-@respx.mock
-async def test_fetch_prs_mergeable_clean_when_state_unknown():
+async def test_fetch_prs_mergeable_clean_when_state_unknown(httpx2_mock: respx.Router):
     # mergeable_state can be null/"unknown" right after a push, before
     # GitHub finishes computing it -- treated the same as clean, not
     # flagged as a conflict.
-    respx.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
         return_value=httpx.Response(200, json=[_pr(number=1)])
     )
-    _mock_open_pr_extras(number=1, mergeable_state="unknown")
+    _mock_open_pr_extras(httpx2_mock, number=1, mergeable_state="unknown")
     prs = await fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
     assert prs[0]["mergeable"] == "clean"
 
