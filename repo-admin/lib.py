@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx2
+import yaml
 from rich.console import Console
 from rich.progress import Progress
 
@@ -19,8 +20,19 @@ LIB_DIR = Path(__file__).resolve().parent
 API_BASE = "https://api.github.com"
 DEFAULT_OWNER = os.environ.get("GH_OWNER", "hugoh")
 DEFAULT_JOBS = int(os.environ.get("GH_JOBS", "6"))
+PAGES_DOMAINS_FILE = LIB_DIR / "pages-domains.yaml"
 
 console = Console()
+
+
+def progress_bar(*, console: Console = console, **kwargs: Any) -> Progress:
+    """A Progress bound to `console` (module-level `console` by default),
+    silenced when its console isn't a terminal -- e.g. `cmd > file` or
+    piping into another command -- so its status text (which Progress still
+    renders as plain lines even without a tty) doesn't end up mixed into
+    redirected output.
+    """
+    return Progress(console=console, disable=not console.is_terminal, **kwargs)
 
 
 class Status(enum.Enum):
@@ -243,6 +255,14 @@ def unmatched_include_forks(
     return include_forks - repo_names
 
 
+def default_pages_domains() -> dict[str, str]:
+    """Repo -> GitHub Pages custom domain mapping, read from
+    pages-domains.yaml -- the single source of truth also read by
+    iac/cloudflare's OpenTofu config to generate matching DNS records.
+    """
+    return yaml.safe_load(PAGES_DOMAINS_FILE.read_text()) or {}
+
+
 def filter_repos(
     repos_json: list[dict],
     *,
@@ -320,7 +340,7 @@ async def run_parallel(
     failed_names: list[str] = []
     sem = asyncio.Semaphore(jobs)
 
-    with Progress(console=console) as progress:
+    with progress_bar() as progress:
         task = progress.add_task("Processing repos...", total=len(repos))
 
         async def call(repo: Repo) -> None:

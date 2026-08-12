@@ -298,6 +298,15 @@ class _FakeResponse:
         return {}
 
 
+class _FakeResponseWithJson(_FakeResponse):
+    def __init__(self, status_code, body):
+        super().__init__(status_code)
+        self._body = body
+
+    def json(self):
+        return self._body
+
+
 def _security_worker(
     monkeypatch, *, repo_json, vuln_alerts_enabled, pvr_json, dry_run, api_responses=()
 ):
@@ -819,3 +828,399 @@ def test_all_subcommand_is_registered_in_parser():
     args = repo_admin.build_parser().parse_args(["all", "--dry-run"])
     assert args.func == repo_admin.cmd_all
     assert args.dry_run is True
+
+
+# ---------------------------------------------------------------------------
+# pages-domain
+# ---------------------------------------------------------------------------
+
+DOMAIN = "awesome-jj.larve.net"
+
+
+def test_pages_domain_up_to_date_true_when_cname_and_https_match():
+    assert repo_admin.pages_domain_up_to_date(
+        {"cname": DOMAIN, "https_enforced": True}, DOMAIN
+    )
+
+
+def test_pages_domain_up_to_date_false_when_cname_differs():
+    assert not repo_admin.pages_domain_up_to_date(
+        {"cname": "other.larve.net", "https_enforced": True}, DOMAIN
+    )
+
+
+def test_pages_domain_up_to_date_false_when_https_not_enforced():
+    assert not repo_admin.pages_domain_up_to_date(
+        {"cname": DOMAIN, "https_enforced": False}, DOMAIN
+    )
+
+
+def test_pages_domain_https_ready_true_when_cert_approved():
+    assert repo_admin.pages_domain_https_ready(
+        {"https_certificate": {"state": "approved"}}
+    )
+
+
+def test_pages_domain_https_ready_false_when_cert_pending():
+    assert not repo_admin.pages_domain_https_ready(
+        {"https_certificate": {"state": "pending"}}
+    )
+
+
+def test_pages_domain_https_ready_false_when_no_certificate():
+    assert not repo_admin.pages_domain_https_ready({})
+
+
+def test_pages_domain_dry_run_line_unchanged():
+    current = {"cname": DOMAIN, "https_enforced": True}
+    line = repo_admin.pages_domain_dry_run_line(
+        "repo", current, DOMAIN, Status.UNCHANGED
+    )
+    assert line == f"{'repo':<30} unchanged: cname={DOMAIN}, https enforced"
+
+
+def test_pages_domain_dry_run_line_would_set_cname():
+    current = {"cname": None, "https_enforced": False}
+    line = repo_admin.pages_domain_dry_run_line("repo", current, DOMAIN, Status.OK)
+    assert line == f"{'repo':<30} would set cname -> {DOMAIN}"
+
+
+def test_pages_domain_dry_run_line_would_enable_https():
+    current = {
+        "cname": DOMAIN,
+        "https_enforced": False,
+        "https_certificate": {"state": "approved"},
+    }
+    line = repo_admin.pages_domain_dry_run_line("repo", current, DOMAIN, Status.OK)
+    assert line == f"{'repo':<30} cname={DOMAIN}; would enable https_enforced"
+
+
+def test_pages_domain_dry_run_line_cert_pending():
+    current = {
+        "cname": DOMAIN,
+        "https_enforced": False,
+        "https_certificate": {"state": "pending"},
+    }
+    line = repo_admin.pages_domain_dry_run_line(
+        "repo", current, DOMAIN, Status.LIMITED_UNCHANGED
+    )
+    assert line == f"{'repo':<30} unchanged: cname={DOMAIN}; https cert pending"
+
+
+def test_pages_domain_apply_line_unchanged_https_enforced():
+    settings = {"cname": DOMAIN, "https_enforced": True}
+    line = repo_admin.pages_domain_apply_line(
+        "repo", settings, settings, DOMAIN, Status.UNCHANGED
+    )
+    assert line == f"{'repo':<30} unchanged: cname={DOMAIN}, https enforced"
+
+
+def test_pages_domain_apply_line_unchanged_cert_pending():
+    settings = {"cname": DOMAIN, "https_enforced": False}
+    line = repo_admin.pages_domain_apply_line(
+        "repo", settings, settings, DOMAIN, Status.LIMITED_UNCHANGED
+    )
+    assert line == f"{'repo':<30} unchanged: cname={DOMAIN}; https cert pending"
+
+
+def test_pages_domain_apply_line_cname_changed():
+    before = {"cname": None, "https_enforced": False}
+    after = {"cname": DOMAIN, "https_enforced": False}
+    line = repo_admin.pages_domain_apply_line("repo", before, after, DOMAIN, Status.OK)
+    assert line == f"{'repo':<30} cname -> {DOMAIN}"
+
+
+def test_pages_domain_apply_line_https_enabled():
+    before = {"cname": DOMAIN, "https_enforced": False}
+    after = {"cname": DOMAIN, "https_enforced": True}
+    line = repo_admin.pages_domain_apply_line("repo", before, after, DOMAIN, Status.OK)
+    assert line == f"{'repo':<30} https_enforced -> true"
+
+
+async def test_pages_domain_worker_dry_run_unchanged(monkeypatch):
+    async def fake_pages_config(owner, name):
+        return {"cname": DOMAIN, "https_enforced": True}
+
+    monkeypatch.setattr(repo_admin, "_pages_config", fake_pages_config)
+    worker = repo_admin.make_pages_domain_worker(
+        owner="hugoh", dry_run=True, domains={"repo": DOMAIN}
+    )
+    result = await worker(REPO)
+    assert result.status == Status.UNCHANGED
+
+
+async def test_pages_domain_worker_dry_run_would_set_cname(monkeypatch):
+    async def fake_pages_config(owner, name):
+        return {"cname": None, "https_enforced": False}
+
+    monkeypatch.setattr(repo_admin, "_pages_config", fake_pages_config)
+    worker = repo_admin.make_pages_domain_worker(
+        owner="hugoh", dry_run=True, domains={"repo": DOMAIN}
+    )
+    result = await worker(REPO)
+    assert result.status == Status.LIMITED
+    assert "would set cname" in result.line
+
+
+async def test_pages_domain_worker_dry_run_limited_unchanged_when_cert_pending(
+    monkeypatch,
+):
+    async def fake_pages_config(owner, name):
+        return {
+            "cname": DOMAIN,
+            "https_enforced": False,
+            "https_certificate": {"state": "pending"},
+        }
+
+    monkeypatch.setattr(repo_admin, "_pages_config", fake_pages_config)
+    worker = repo_admin.make_pages_domain_worker(
+        owner="hugoh", dry_run=True, domains={"repo": DOMAIN}
+    )
+    result = await worker(REPO)
+    assert result.status == Status.LIMITED_UNCHANGED
+
+
+async def test_pages_domain_worker_apply_sets_cname(monkeypatch):
+    calls = []
+    responses = iter(
+        [
+            {"cname": None, "https_enforced": False},
+            {"cname": DOMAIN, "https_enforced": False},
+        ]
+    )
+
+    async def fake_pages_config(owner, name):
+        return next(responses)
+
+    async def fake_api_json(method, path, **kwargs):
+        calls.append((method, path, kwargs.get("json")))
+        return {}
+
+    monkeypatch.setattr(repo_admin, "_pages_config", fake_pages_config)
+    monkeypatch.setattr(repo_admin, "api_json", fake_api_json)
+    worker = repo_admin.make_pages_domain_worker(
+        owner="hugoh", dry_run=False, domains={"repo": DOMAIN}
+    )
+    result = await worker(REPO)
+    assert result.status == Status.LIMITED
+    assert calls == [("PUT", "/repos/hugoh/repo/pages", {"cname": DOMAIN})]
+
+
+async def test_pages_domain_worker_apply_enables_https_when_cert_ready(monkeypatch):
+    calls = []
+    responses = iter(
+        [
+            {
+                "cname": DOMAIN,
+                "https_enforced": False,
+                "https_certificate": {"state": "approved"},
+            },
+            {"cname": DOMAIN, "https_enforced": True},
+        ]
+    )
+
+    async def fake_pages_config(owner, name):
+        return next(responses)
+
+    async def fake_api_json(method, path, **kwargs):
+        calls.append((method, path, kwargs.get("json")))
+        return {}
+
+    monkeypatch.setattr(repo_admin, "_pages_config", fake_pages_config)
+    monkeypatch.setattr(repo_admin, "api_json", fake_api_json)
+    worker = repo_admin.make_pages_domain_worker(
+        owner="hugoh", dry_run=False, domains={"repo": DOMAIN}
+    )
+    result = await worker(REPO)
+    assert result.status == Status.OK
+    assert calls == [("PUT", "/repos/hugoh/repo/pages", {"https_enforced": True})]
+
+
+async def test_pages_domain_worker_apply_unchanged_when_already_at_target(monkeypatch):
+    async def fake_pages_config(owner, name):
+        return {"cname": DOMAIN, "https_enforced": True}
+
+    async def fake_api_json(*a, **k):
+        raise AssertionError("should not call the API when already at target")
+
+    monkeypatch.setattr(repo_admin, "_pages_config", fake_pages_config)
+    monkeypatch.setattr(repo_admin, "api_json", fake_api_json)
+    worker = repo_admin.make_pages_domain_worker(
+        owner="hugoh", dry_run=False, domains={"repo": DOMAIN}
+    )
+    result = await worker(REPO)
+    assert result.status == Status.UNCHANGED
+
+
+async def test_cmd_pages_domain_defaults_to_mapped_repos(monkeypatch):
+    monkeypatch.setattr(
+        repo_admin.lib, "default_pages_domains", lambda: {"awesome-jj": DOMAIN}
+    )
+    seen = {}
+
+    async def fake_list_repos(owner, *, only=None, skip=None):
+        seen["only"] = only
+        seen["skip"] = skip
+        return []
+
+    monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
+    args = argparse.Namespace(dry_run=True, only=None, skip=None)
+    assert await repo_admin.cmd_pages_domain(args) == 0
+    assert seen == {"only": {"awesome-jj"}, "skip": None}
+
+
+async def test_cmd_pages_domain_errors_on_unmapped_only_repo(monkeypatch, capsys):
+    monkeypatch.setattr(
+        repo_admin.lib, "default_pages_domains", lambda: {"awesome-jj": DOMAIN}
+    )
+    args = argparse.Namespace(dry_run=True, only="not-mapped", skip=None)
+    assert await repo_admin.cmd_pages_domain(args) == 1
+    assert "not-mapped" in capsys.readouterr().err
+
+
+def test_pages_domain_subcommand_is_registered_in_parser():
+    args = repo_admin.build_parser().parse_args(["pages-domain", "--dry-run"])
+    assert args.func == repo_admin.cmd_pages_domain
+    assert args.dry_run is True
+
+
+# ---------------------------------------------------------------------------
+# pages-status
+# ---------------------------------------------------------------------------
+
+
+async def test_cmd_pages_status_lists_enabled_repos_and_flags_unmapped(
+    monkeypatch, capsys
+):
+    mapped_repo = Repo(
+        name="awesome-jj", default_branch="main", is_private=False, is_fork=False
+    )
+    unmapped_repo = Repo(
+        name="other-repo", default_branch="main", is_private=False, is_fork=False
+    )
+    disabled_repo = Repo(
+        name="no-pages", default_branch="main", is_private=False, is_fork=False
+    )
+
+    async def fake_list_repos(owner, *, only=None, skip=None):
+        return [mapped_repo, unmapped_repo, disabled_repo]
+
+    pages_configs = {
+        "awesome-jj": _FakeResponseWithJson(
+            200,
+            {
+                "cname": DOMAIN,
+                "https_enforced": True,
+                "html_url": f"https://{DOMAIN}",
+            },
+        ),
+        "other-repo": _FakeResponseWithJson(
+            200,
+            {
+                "cname": None,
+                "https_enforced": False,
+                "html_url": "https://hugoh.github.io/other-repo/",
+            },
+        ),
+        "no-pages": _FakeResponseWithJson(404, {}),
+    }
+
+    async def fake_api_request(method, path, **kwargs):
+        name = path.split("/")[3]
+        return pages_configs[name]
+
+    monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
+    monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
+    monkeypatch.setattr(
+        repo_admin.lib, "default_pages_domains", lambda: {"awesome-jj": DOMAIN}
+    )
+
+    args = argparse.Namespace(only=None, skip=None)
+    assert await repo_admin.cmd_pages_status(args) == 0
+    out = capsys.readouterr().out
+    assert "awesome-jj" in out
+    assert "other-repo" in out
+    assert "no-pages" not in out
+    assert f"https://{DOMAIN}" in out
+    assert "https://hugoh.github.io/other-repo/" in out
+    assert "not in pages-domains.yaml" in out
+    assert "other-repo" in out.split("not in pages-domains.yaml")[1]
+
+
+def test_pages_status_subcommand_is_registered_in_parser():
+    args = repo_admin.build_parser().parse_args(["pages-status"])
+    assert args.func == repo_admin.cmd_pages_status
+
+
+# ---------------------------------------------------------------------------
+# pages-domain-config
+# ---------------------------------------------------------------------------
+
+
+def test_pages_domain_suggest_appends_domain():
+    assert repo_admin.pages_domain_suggest("awesome-jj", "larve.net") == (
+        "awesome-jj.larve.net"
+    )
+
+
+def test_pages_domain_suggest_replaces_dots_in_repo_name_with_dashes():
+    assert repo_admin.pages_domain_suggest("AppBadgeWatcher.spoon", "larve.net") == (
+        "AppBadgeWatcher-spoon.larve.net"
+    )
+
+
+async def test_cmd_pages_domain_config_uses_explicit_only_without_api_calls(
+    monkeypatch, capsys
+):
+    async def fail_list_repos(*a, **k):
+        raise AssertionError("should not query GitHub when --only is given")
+
+    monkeypatch.setattr(repo_admin, "list_repos", fail_list_repos)
+    args = argparse.Namespace(domain="larve.net", only="awesome-jj,hrd", skip=None)
+    assert await repo_admin.cmd_pages_domain_config(args) == 0
+    out = capsys.readouterr().out
+    assert "awesome-jj: awesome-jj.larve.net" in out
+    assert "hrd: hrd.larve.net" in out
+
+
+async def test_cmd_pages_domain_config_auto_discovers_unmapped_enabled_repos(
+    monkeypatch, capsys
+):
+    mapped_repo = Repo(
+        name="awesome-jj", default_branch="main", is_private=False, is_fork=False
+    )
+    unmapped_repo = Repo(
+        name="AppBadgeWatcher.spoon",
+        default_branch="main",
+        is_private=False,
+        is_fork=False,
+    )
+
+    async def fake_list_repos(owner, *, only=None, skip=None):
+        return [mapped_repo, unmapped_repo]
+
+    async def fake_pages_enabled_repos(repos):
+        return [
+            (mapped_repo, {"cname": DOMAIN}),
+            (unmapped_repo, {"cname": None}),
+        ]
+
+    monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
+    monkeypatch.setattr(repo_admin, "_pages_enabled_repos", fake_pages_enabled_repos)
+    monkeypatch.setattr(
+        repo_admin.lib, "default_pages_domains", lambda: {"awesome-jj": DOMAIN}
+    )
+
+    args = argparse.Namespace(domain="larve.net", only=None, skip=None)
+    assert await repo_admin.cmd_pages_domain_config(args) == 0
+    out = capsys.readouterr().out
+    assert "AppBadgeWatcher-spoon.larve.net" in out
+    assert "awesome-jj" not in out
+
+
+def test_pages_domain_config_subcommand_is_registered_in_parser():
+    args = repo_admin.build_parser().parse_args(
+        ["pages-domain-config", "--domain", "larve.net"]
+    )
+    assert args.func == repo_admin.cmd_pages_domain_config
+    assert args.domain == "larve.net"
