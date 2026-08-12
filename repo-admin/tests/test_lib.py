@@ -1,4 +1,5 @@
 import asyncio
+import io
 
 import httpx
 import lib
@@ -21,6 +22,7 @@ from lib import (
     run_parallel,
     unmatched_include_forks,
 )
+from rich.console import Console
 
 REPOS_JSON = [
     {
@@ -117,6 +119,23 @@ def test_unmatched_include_forks_empty_for_no_include_forks():
     assert unmatched_include_forks(set(), REPOS_JSON) == set()
 
 
+def test_default_pages_domains_reads_mapping_from_file(tmp_path, monkeypatch):
+    domains_file = tmp_path / "pages-domains.yaml"
+    domains_file.write_text("awesome-jj: awesome-jj.larve.net\nhrd: hrd.larve.net\n")
+    monkeypatch.setattr(lib, "PAGES_DOMAINS_FILE", domains_file)
+    assert lib.default_pages_domains() == {
+        "awesome-jj": "awesome-jj.larve.net",
+        "hrd": "hrd.larve.net",
+    }
+
+
+def test_default_pages_domains_ignores_comments(tmp_path, monkeypatch):
+    domains_file = tmp_path / "pages-domains.yaml"
+    domains_file.write_text("# a comment\nawesome-jj: awesome-jj.larve.net\n")
+    monkeypatch.setattr(lib, "PAGES_DOMAINS_FILE", domains_file)
+    assert lib.default_pages_domains() == {"awesome-jj": "awesome-jj.larve.net"}
+
+
 def test_repo_result_defaults_to_ok_status():
     repo = Repo(name="repo", default_branch="main", is_private=False, is_fork=False)
     assert RepoResult(repo, "line").status == Status.OK
@@ -172,6 +191,26 @@ def test_print_status_does_not_interpret_brackets_in_line_as_markup(capsys):
     print_status(Status.OK, "repo {'allow_auto_merge': True} -> [oops]")
     out = capsys.readouterr().out
     assert "{'allow_auto_merge': True} -> [oops]" in out
+
+
+def test_progress_bar_disabled_when_console_is_not_a_terminal():
+    non_tty_console = Console(file=io.StringIO())
+    assert lib.progress_bar(console=non_tty_console).disable is True
+
+
+def test_progress_bar_enabled_when_console_is_a_terminal():
+    tty_console = Console(file=io.StringIO(), force_terminal=True)
+    assert lib.progress_bar(console=tty_console).disable is False
+
+
+def test_progress_bar_prints_nothing_when_disabled():
+    output = io.StringIO()
+    non_tty_console = Console(file=output)
+    with lib.progress_bar(console=non_tty_console) as bar:
+        task = bar.add_task("working", total=2)
+        bar.advance(task)
+        bar.advance(task)
+    assert output.getvalue() == ""
 
 
 async def test_run_parallel_returns_worker_results_for_every_repo():

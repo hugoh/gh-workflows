@@ -12,6 +12,13 @@ Commands:
   security-features   enable free, native GitHub security features
   all                 run merge-settings, branch-protection, and
                        security-features in sequence
+  pages-domain        set each repo's GitHub Pages custom domain, from the
+                       mapping in pages-domains.yaml
+  pages-status        list repos with GitHub Pages enabled and their custom
+                       domain, flagging ones missing from pages-domains.yaml
+  pages-domain-config print pages-domains.yaml entries to stdout for a base
+                       domain (--domain), for --only repos or, if omitted,
+                       repos pages-status would flag as unmapped
 
 Forks are excluded by default -- except those listed in include-forks.txt;
 edit that file to add more, or override per-run with GH_INCLUDE_FORKS
@@ -29,6 +36,7 @@ import sys
 
 import lib
 from lib import (
+    DEFAULT_JOBS,
     DEFAULT_OWNER,
     GhError,
     Repo,
@@ -43,7 +51,6 @@ from lib import (
     result_line,
     run_parallel,
 )
-from rich.progress import Progress
 from rich.table import Table
 
 
@@ -64,7 +71,7 @@ class Tag(enum.StrEnum):
 
 
 async def cmd_list(args: argparse.Namespace) -> int:
-    with Progress(console=lib.console, transient=True) as progress:
+    with lib.progress_bar(transient=True) as progress:
         progress.add_task("Fetching repos...", total=None)
         repos = await list_repos(
             DEFAULT_OWNER, only=as_set(args.only), skip=as_set(args.skip)
@@ -594,6 +601,258 @@ async def cmd_branch_protection(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# pages-domain
+#
+# Sets each repo's GitHub Pages custom domain from pages-domains.yaml -- the
+# single source of truth also read by iac/cloudflare's OpenTofu config to
+# generate the matching CNAME/verification DNS records. Unlike the other
+# commands, this doesn't apply the same setting account-wide: only repos
+# listed in the mapping are touched.
+#
+# https_enforced is only ever turned on, never off, and only once GitHub
+# reports the domain's certificate as "approved" -- that requires the CNAME
+# DNS record to already resolve, so a freshly-set cname always needs a later
+# rerun to pick up https_enforced once the cert catches up.
+# ---------------------------------------------------------------------------
+
+
+async def _pages_config(owner: str, name: str) -> dict:
+    return await api_json("GET", f"/repos/{owner}/{name}/pages")
+
+
+def pages_domain_https_ready(pages_json: dict) -> bool:
+    return (pages_json.get("https_certificate") or {}).get("state") == "approved"
+
+
+def pages_domain_up_to_date(pages_json: dict, domain: str) -> bool:
+    return (
+        pages_json.get("cname") == domain and pages_json.get("https_enforced") is True
+    )
+
+
+def pages_domain_dry_run_line(
+    name: str, pages_json: dict, domain: str, status: Status
+) -> str:
+    cname_ok = pages_json.get("cname") == domain
+    https_ok = pages_json.get("https_enforced") is True
+    if cname_ok and https_ok:
+        detail = f"cname={domain}, https enforced"
+    elif not cname_ok:
+        detail = f"would set cname -> {domain}"
+    elif pages_domain_https_ready(pages_json):
+        detail = f"cname={domain}; would enable https_enforced"
+    else:
+        detail = f"cname={domain}; https cert pending"
+    return result_line(name, detail, status)
+
+
+def pages_domain_apply_line(
+    name: str, before: dict, after: dict, domain: str, status: Status
+) -> str:
+    cname_changed = before.get("cname") != after.get("cname")
+    https_changed = before.get("https_enforced") != after.get("https_enforced")
+    if not cname_changed and not https_changed:
+        detail = (
+            f"cname={domain}, https enforced"
+            if after.get("https_enforced")
+            else f"cname={domain}; https cert pending"
+        )
+        return result_line(name, detail, status)
+    parts = []
+    if cname_changed:
+        parts.append(f"cname -> {domain}")
+    if https_changed:
+        parts.append("https_enforced -> true")
+    return result_line(name, ", ".join(parts), status)
+
+
+def make_pages_domain_worker(owner: str, dry_run: bool, domains: dict[str, str]):
+    async def worker(repo: Repo) -> RepoResult:
+        domain = domains[repo.name]
+        current = await _pages_config(owner, repo.name)
+
+        if dry_run:
+            cname_ok = current.get("cname") == domain
+            would_change = not cname_ok or (
+                pages_domain_https_ready(current)
+                and current.get("https_enforced") is not True
+            )
+            status = classify_status(
+                at_target=pages_domain_up_to_date(current, domain), changed=would_change
+            )
+            return RepoResult(
+                repo,
+                pages_domain_dry_run_line(repo.name, current, domain, status),
+                status,
+            )
+
+        before = current
+        payload: dict = {}
+        if before.get("cname") != domain:
+            payload["cname"] = domain
+        elif (
+            pages_domain_https_ready(before)
+            and before.get("https_enforced") is not True
+        ):
+            payload["https_enforced"] = True
+
+        if payload:
+            await api_json("PUT", f"/repos/{owner}/{repo.name}/pages", json=payload)
+            after = await _pages_config(owner, repo.name)
+        else:
+            after = before
+
+        status = classify_status(
+            at_target=pages_domain_up_to_date(after, domain), changed=before != after
+        )
+        return RepoResult(
+            repo,
+            pages_domain_apply_line(repo.name, before, after, domain, status),
+            status,
+        )
+
+    return worker
+
+
+async def cmd_pages_domain(args: argparse.Namespace) -> int:
+    domains = lib.default_pages_domains()
+    only = as_set(args.only)
+    if only:
+        unknown = only - set(domains)
+        if unknown:
+            print(
+                f"error: not in pages-domains.yaml: {', '.join(sorted(unknown))}",
+                file=sys.stderr,
+            )
+            return 1
+    else:
+        only = set(domains)
+
+    repos = await list_repos(DEFAULT_OWNER, only=only, skip=as_set(args.skip))
+    await run_parallel(
+        repos, make_pages_domain_worker(DEFAULT_OWNER, args.dry_run, domains)
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# pages-status
+#
+# Read-only survey of which repos have GitHub Pages enabled and what custom
+# domain (if any) they're currently serving -- lets pages-domains.yaml be
+# checked for repos that have Pages on but aren't mapped yet.
+# ---------------------------------------------------------------------------
+
+
+async def _fetch_pages_config(owner: str, name: str) -> dict | None:
+    response = await api_request("GET", f"/repos/{owner}/{name}/pages")
+    if response.status_code == 404:
+        return None
+    if not response.is_success:
+        raise GhError(error_message(response), status_code=response.status_code)
+    return response.json()
+
+
+async def _pages_enabled_repos(repos: list[Repo]) -> list[tuple[Repo, dict]]:
+    """Fetches every repo's Pages config concurrently and returns the ones
+    with Pages enabled, sorted by name.
+    """
+    sem = asyncio.Semaphore(DEFAULT_JOBS)
+
+    async def fetch_one(repo: Repo) -> tuple[Repo, dict | None]:
+        async with sem:
+            return repo, await _fetch_pages_config(DEFAULT_OWNER, repo.name)
+
+    with lib.progress_bar() as progress:
+        task = progress.add_task("Fetching Pages config...", total=len(repos))
+
+        async def fetch_and_advance(repo: Repo) -> tuple[Repo, dict | None]:
+            result = await fetch_one(repo)
+            progress.advance(task)
+            return result
+
+        results = await asyncio.gather(*(fetch_and_advance(repo) for repo in repos))
+
+    enabled: list[tuple[Repo, dict]] = [
+        (repo, config) for repo, config in results if config is not None
+    ]
+    enabled.sort(key=lambda item: item[0].name)
+    return enabled
+
+
+async def cmd_pages_status(args: argparse.Namespace) -> int:
+    with lib.progress_bar(transient=True) as progress:
+        progress.add_task("Fetching repos...", total=None)
+        repos = await list_repos(
+            DEFAULT_OWNER, only=as_set(args.only), skip=as_set(args.skip)
+        )
+
+    enabled = await _pages_enabled_repos(repos)
+    domains = lib.default_pages_domains()
+
+    table = Table()
+    table.add_column("NAME")
+    table.add_column("URL", overflow="fold")
+    table.add_column("HTTPS")
+    table.add_column("MAPPED")
+    for repo, config in enabled:
+        https = (
+            "enforced"
+            if config.get("https_enforced")
+            else (config.get("https_certificate") or {}).get("state", "n/a")
+        )
+        table.add_row(
+            repo.name,
+            config.get("html_url") or "(unknown)",
+            https,
+            "yes" if repo.name in domains else "no",
+        )
+    lib.console.print(table)
+
+    missing = sorted(repo.name for repo, _config in enabled if repo.name not in domains)
+    if missing:
+        print()
+        print(f"Pages enabled but not in pages-domains.yaml: {' '.join(missing)}")
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# pages-domain-config
+#
+# Prints pages-domains.yaml-formatted entries to stdout for a base domain --
+# `<repo> -> <repo>.<domain>`, dots in the repo name replaced with dashes
+# since a raw dot would split a hostname across two DNS labels instead of
+# one. With --only, generates for exactly those repos (no API calls). With
+# neither, auto-discovers repos with Pages enabled but missing from
+# pages-domains.yaml -- the same set `pages-status` flags -- and suggests
+# entries for those.
+# ---------------------------------------------------------------------------
+
+
+def pages_domain_suggest(repo_name: str, domain: str) -> str:
+    return f"{repo_name.replace('.', '-')}.{domain}"
+
+
+async def cmd_pages_domain_config(args: argparse.Namespace) -> int:
+    only = as_set(args.only)
+    if only:
+        names = sorted(only)
+    else:
+        repos = await list_repos(DEFAULT_OWNER, only=None, skip=as_set(args.skip))
+        enabled = await _pages_enabled_repos(repos)
+        domains = lib.default_pages_domains()
+        names = sorted(
+            repo.name for repo, _config in enabled if repo.name not in domains
+        )
+
+    for name in names:
+        print(f"{name}: {pages_domain_suggest(name, args.domain)}")
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # all
 # ---------------------------------------------------------------------------
 
@@ -654,6 +913,19 @@ def build_parser() -> argparse.ArgumentParser:
         func=cmd_security_features
     )
     subparsers.add_parser("all", parents=[mutating_parent]).set_defaults(func=cmd_all)
+    subparsers.add_parser("pages-domain", parents=[mutating_parent]).set_defaults(
+        func=cmd_pages_domain
+    )
+    subparsers.add_parser("pages-status", parents=[filter_parent]).set_defaults(
+        func=cmd_pages_status
+    )
+    pages_domain_config_parser = subparsers.add_parser(
+        "pages-domain-config", parents=[filter_parent]
+    )
+    pages_domain_config_parser.add_argument(
+        "--domain", required=True, help="base domain, e.g. larve.net"
+    )
+    pages_domain_config_parser.set_defaults(func=cmd_pages_domain_config)
 
     return parser
 
