@@ -755,6 +755,38 @@ async def test_branch_protection_worker_apply_ok_when_updating_from_stale_state(
     assert result.tag == repo_admin.Tag.APPLIED
 
 
+async def test_cmd_branch_protection_merges_exclude_list_into_skip(monkeypatch):
+    seen = {}
+
+    async def fake_list_repos(owner, *, only=None, skip=None):
+        seen["skip"] = skip
+        return []
+
+    monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
+    monkeypatch.setattr(
+        repo_admin, "default_branch_protection_exclude", lambda: {"homebrew-tap"}
+    )
+    args = argparse.Namespace(only=None, skip="other-repo", dry_run=True)
+    await repo_admin.cmd_branch_protection(args)
+    assert seen["skip"] == {"homebrew-tap", "other-repo"}
+
+
+async def test_cmd_branch_protection_excludes_even_without_explicit_skip(monkeypatch):
+    seen = {}
+
+    async def fake_list_repos(owner, *, only=None, skip=None):
+        seen["skip"] = skip
+        return []
+
+    monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
+    monkeypatch.setattr(
+        repo_admin, "default_branch_protection_exclude", lambda: {"homebrew-tap"}
+    )
+    args = argparse.Namespace(only=None, skip=None, dry_run=True)
+    await repo_admin.cmd_branch_protection(args)
+    assert seen["skip"] == {"homebrew-tap"}
+
+
 # ---------------------------------------------------------------------------
 # all
 # ---------------------------------------------------------------------------

@@ -1,0 +1,4 @@
+# Repos that intentionally don't get branch protection applied (e.g. no
+# CI/PR workflow -- Homebrew tap repos are just formula files). One name per
+# line. Blank lines and lines starting with # are ignored.
+homebrew-tap
