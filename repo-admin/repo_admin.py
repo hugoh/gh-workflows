@@ -46,6 +46,7 @@ from lib import (
     api_request,
     as_set,
     classify_status,
+    default_branch_protection_exclude,
     error_message,
     list_repos,
     result_line,
@@ -569,9 +570,8 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
 
 
 async def cmd_branch_protection(args: argparse.Namespace) -> int:
-    repos = await list_repos(
-        DEFAULT_OWNER, only=as_set(args.only), skip=as_set(args.skip)
-    )
+    skip = (as_set(args.skip) or set()) | default_branch_protection_exclude()
+    repos = await list_repos(DEFAULT_OWNER, only=as_set(args.only), skip=skip)
     results = await run_parallel(
         repos, make_branch_protection_worker(DEFAULT_OWNER, args.dry_run)
     )

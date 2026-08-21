@@ -76,7 +76,10 @@ uv run repo_admin.py <command> [--dry-run] [--only name1,name2] [--skip name1,na
   for why). `--dry-run` diffs each repo's current protection against the
   baseline and prints "unchanged: ..." or "would update", rather than just
   showing what would be required. Private repos on a plan without
-  branch-protection access are reported, not failed.
+  branch-protection access are reported, not failed. Repos listed in
+  `branch-protection-exclude.txt` (e.g. `homebrew-tap`, which has no CI/PR
+  workflow) are always skipped; override per-run with
+  `GH_BRANCH_PROTECTION_EXCLUDE`.
 - **`security-features [--dry-run]`** — enables Dependabot vulnerability
   alerts (all repos, free), plus secret scanning, secret scanning push
   protection, Dependabot security updates, and private vulnerability

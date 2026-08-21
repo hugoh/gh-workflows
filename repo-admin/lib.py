@@ -21,6 +21,7 @@ API_BASE = "https://api.github.com"
 DEFAULT_OWNER = os.environ.get("GH_OWNER", "hugoh")
 DEFAULT_JOBS = int(os.environ.get("GH_JOBS", "6"))
 PAGES_DOMAINS_FILE = LIB_DIR / "pages-domains.yaml"
+BRANCH_PROTECTION_EXCLUDE_FILE = LIB_DIR / "branch-protection-exclude.txt"
 
 console = Console()
 
@@ -253,6 +254,24 @@ def unmatched_include_forks(
     """
     repo_names = {entry["name"] for entry in repos_json}
     return include_forks - repo_names
+
+
+def default_branch_protection_exclude() -> set[str]:
+    """Repos excluded from branch-protection specifically (e.g. homebrew-tap,
+    which has no CI/PR workflow), read from branch-protection-exclude.txt
+    (one name per line, '#' comments and blank lines ignored). Override with
+    GH_BRANCH_PROTECTION_EXCLUDE (comma-separated) for a one-off run; edit
+    the file to permanently add more.
+    """
+    env_value = os.environ.get("GH_BRANCH_PROTECTION_EXCLUDE")
+    if env_value is not None:
+        return as_set(env_value) or set()
+    excluded = set()
+    for line in BRANCH_PROTECTION_EXCLUDE_FILE.read_text().splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            excluded.add(stripped)
+    return excluded
 
 
 def default_pages_domains() -> dict[str, str]:

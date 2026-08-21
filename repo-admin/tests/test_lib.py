@@ -136,6 +136,32 @@ def test_default_pages_domains_ignores_comments(tmp_path, monkeypatch):
     assert lib.default_pages_domains() == {"awesome-jj": "awesome-jj.larve.net"}
 
 
+def test_default_branch_protection_exclude_reads_names_from_file(tmp_path, monkeypatch):
+    exclude_file = tmp_path / "branch-protection-exclude.txt"
+    exclude_file.write_text("homebrew-tap\n")
+    monkeypatch.setattr(lib, "BRANCH_PROTECTION_EXCLUDE_FILE", exclude_file)
+    monkeypatch.delenv("GH_BRANCH_PROTECTION_EXCLUDE", raising=False)
+    assert lib.default_branch_protection_exclude() == {"homebrew-tap"}
+
+
+def test_default_branch_protection_exclude_ignores_comments_and_blank_lines(
+    tmp_path, monkeypatch
+):
+    exclude_file = tmp_path / "branch-protection-exclude.txt"
+    exclude_file.write_text("# a comment\n\nhomebrew-tap\n")
+    monkeypatch.setattr(lib, "BRANCH_PROTECTION_EXCLUDE_FILE", exclude_file)
+    monkeypatch.delenv("GH_BRANCH_PROTECTION_EXCLUDE", raising=False)
+    assert lib.default_branch_protection_exclude() == {"homebrew-tap"}
+
+
+def test_default_branch_protection_exclude_env_override(tmp_path, monkeypatch):
+    exclude_file = tmp_path / "branch-protection-exclude.txt"
+    exclude_file.write_text("homebrew-tap\n")
+    monkeypatch.setattr(lib, "BRANCH_PROTECTION_EXCLUDE_FILE", exclude_file)
+    monkeypatch.setenv("GH_BRANCH_PROTECTION_EXCLUDE", "other-repo,another-repo")
+    assert lib.default_branch_protection_exclude() == {"other-repo", "another-repo"}
+
+
 def test_repo_result_defaults_to_ok_status():
     repo = Repo(name="repo", default_branch="main", is_private=False, is_fork=False)
     assert RepoResult(repo, "line").status == Status.OK
