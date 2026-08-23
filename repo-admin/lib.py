@@ -233,6 +233,14 @@ async def fetch_repos_json(owner: str) -> list[dict]:
     return await _paginated("GET", f"/users/{owner}/repos", params={"per_page": "100"})
 
 
+async def public_repos_json(owner: str) -> list[dict]:
+    """Lists `owner`'s public repos only, via /users/{owner}/repos -- unlike
+    fetch_repos_json, this always excludes private repos even when `owner`
+    is the authenticated user, so no /user call is needed to branch on it.
+    """
+    return await _paginated("GET", f"/users/{owner}/repos", params={"per_page": "100"})
+
+
 def default_include_forks() -> set[str]:
     """Forks hugoh actually maintains and wants managed like any other repo,
     read from include-forks.txt (one name per line, '#' comments and blank

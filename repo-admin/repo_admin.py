@@ -28,6 +28,9 @@ Usage: repo_admin.py <resource> <verb> [repo ...] [--dry-run] [--verbose] [--ski
   secrets  edit                 open config/secrets.enc.yaml in `sops` for
                                  interactive editing, seeding it from
                                  config/secrets.yaml the first time
+  activity                      rank repos by recent commit activity
+                                 (private+public and public-only tables),
+                                 see activity.py --help for its knobs
 
 Every `<resource> <verb>` accepts trailing repo names to scope to a subset
 (default: every repo); `--skip name1,name2` excludes instead. Forks are
@@ -46,6 +49,7 @@ import asyncio
 import enum
 import sys
 
+import activity
 import lib
 import yaml
 from lib import (
@@ -1096,6 +1100,15 @@ async def cmd_sync(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# activity
+# ---------------------------------------------------------------------------
+
+
+async def cmd_activity(args: argparse.Namespace) -> int:
+    return await activity.run(args)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1159,6 +1172,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     secrets_sync_parser.set_defaults(func=cmd_secrets_sync)
     secrets.add_parser("edit").set_defaults(func=cmd_secrets_edit)
+
+    activity_parser = resources.add_parser("activity")
+    activity_parser.add_argument(
+        "--window-months",
+        type=int,
+        default=12,
+        help="how far back to fetch commits, in months (default 12)",
+    )
+    activity_parser.add_argument(
+        "--half-life-days",
+        type=float,
+        default=30,
+        help="decay half-life for the ranking score, in days (default 30)",
+    )
+    activity_parser.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="max repos to show per table, 0 for unlimited (default 20)",
+    )
+    activity_parser.set_defaults(func=cmd_activity)
 
     return parser
 
