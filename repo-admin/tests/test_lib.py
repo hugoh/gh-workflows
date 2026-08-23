@@ -396,10 +396,15 @@ def test_default_secrets_empty_file_returns_empty_dict(tmp_path, monkeypatch):
     assert lib.default_secrets() == {}
 
 
-def test_decrypt_secrets_calls_sops_and_parses_yaml(tmp_path, monkeypatch):
-    enc_file = tmp_path / "secrets.enc.yaml"
+@pytest.fixture
+def enc_file(tmp_path, monkeypatch):
+    path = tmp_path / "secrets.enc.yaml"
+    monkeypatch.setattr(lib, "SECRETS_ENC_FILE", path)
+    return path
+
+
+def test_decrypt_secrets_calls_sops_and_parses_yaml(enc_file, monkeypatch):
     enc_file.write_text("placeholder")
-    monkeypatch.setattr(lib, "SECRETS_ENC_FILE", enc_file)
 
     def fake_run(cmd, **kwargs):
         assert cmd == ["sops", "-d", str(enc_file)]
@@ -409,10 +414,8 @@ def test_decrypt_secrets_calls_sops_and_parses_yaml(tmp_path, monkeypatch):
     assert lib.decrypt_secrets() == {"NAME": "value"}
 
 
-def test_decrypt_secrets_strips_sops_metadata_key(tmp_path, monkeypatch):
-    enc_file = tmp_path / "secrets.enc.yaml"
+def test_decrypt_secrets_strips_sops_metadata_key(enc_file, monkeypatch):
     enc_file.write_text("placeholder")
-    monkeypatch.setattr(lib, "SECRETS_ENC_FILE", enc_file)
 
     def fake_run(cmd, **kwargs):
         return subprocess.CompletedProcess(
@@ -423,10 +426,8 @@ def test_decrypt_secrets_strips_sops_metadata_key(tmp_path, monkeypatch):
     assert lib.decrypt_secrets() == {"NAME": "value"}
 
 
-def test_decrypt_secrets_raises_gh_error_on_nonzero_exit(tmp_path, monkeypatch):
-    enc_file = tmp_path / "secrets.enc.yaml"
+def test_decrypt_secrets_raises_gh_error_on_nonzero_exit(enc_file, monkeypatch):
     enc_file.write_text("placeholder")
-    monkeypatch.setattr(lib, "SECRETS_ENC_FILE", enc_file)
 
     def fake_run(cmd, **kwargs):
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="no key found")
@@ -436,10 +437,8 @@ def test_decrypt_secrets_raises_gh_error_on_nonzero_exit(tmp_path, monkeypatch):
         lib.decrypt_secrets()
 
 
-def test_decrypt_secrets_raises_gh_error_when_sops_not_on_path(tmp_path, monkeypatch):
-    enc_file = tmp_path / "secrets.enc.yaml"
+def test_decrypt_secrets_raises_gh_error_when_sops_not_on_path(enc_file, monkeypatch):
     enc_file.write_text("placeholder")
-    monkeypatch.setattr(lib, "SECRETS_ENC_FILE", enc_file)
 
     def fake_run(cmd, **kwargs):
         raise FileNotFoundError("sops")
@@ -449,9 +448,7 @@ def test_decrypt_secrets_raises_gh_error_when_sops_not_on_path(tmp_path, monkeyp
         lib.decrypt_secrets()
 
 
-def test_decrypt_secrets_raises_gh_error_when_file_missing(tmp_path, monkeypatch):
-    monkeypatch.setattr(lib, "SECRETS_ENC_FILE", tmp_path / "secrets.enc.yaml")
-
+def test_decrypt_secrets_raises_gh_error_when_file_missing(enc_file, monkeypatch):
     def fail_run(cmd, **kwargs):
         raise AssertionError("should not shell out to sops when the file is missing")
 
@@ -474,10 +471,10 @@ def test_encrypt_secret_value_round_trips_through_sealed_box():
     assert decrypted == b"super-secret-value"
 
 
-def test_init_secrets_file_encrypts_template_via_sops_stdin(tmp_path, monkeypatch):
-    enc_file = tmp_path / "secrets.enc.yaml"
+def test_init_secrets_file_encrypts_template_via_sops_stdin(
+    enc_file, tmp_path, monkeypatch
+):
     config_file = tmp_path / ".sops.yaml"
-    monkeypatch.setattr(lib, "SECRETS_ENC_FILE", enc_file)
     monkeypatch.setattr(lib, "SOPS_CONFIG_FILE", config_file)
 
     def fake_run(cmd, **kwargs):
@@ -502,10 +499,7 @@ def test_init_secrets_file_encrypts_template_via_sops_stdin(tmp_path, monkeypatc
     assert enc_file.read_text() == "NAME: ENC[...]\n"
 
 
-def test_init_secrets_file_raises_gh_error_on_nonzero_exit(tmp_path, monkeypatch):
-    enc_file = tmp_path / "secrets.enc.yaml"
-    monkeypatch.setattr(lib, "SECRETS_ENC_FILE", enc_file)
-
+def test_init_secrets_file_raises_gh_error_on_nonzero_exit(enc_file, monkeypatch):
     def fake_run(cmd, **kwargs):
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="no key found")
 
@@ -515,10 +509,7 @@ def test_init_secrets_file_raises_gh_error_on_nonzero_exit(tmp_path, monkeypatch
     assert not enc_file.exists()
 
 
-def test_init_secrets_file_raises_gh_error_when_sops_not_on_path(tmp_path, monkeypatch):
-    enc_file = tmp_path / "secrets.enc.yaml"
-    monkeypatch.setattr(lib, "SECRETS_ENC_FILE", enc_file)
-
+def test_init_secrets_file_raises_gh_error_when_sops_not_on_path(enc_file, monkeypatch):
     def fake_run(cmd, **kwargs):
         raise FileNotFoundError("sops")
 
@@ -528,11 +519,8 @@ def test_init_secrets_file_raises_gh_error_when_sops_not_on_path(tmp_path, monke
 
 
 def test_edit_secrets_file_runs_sops_on_the_file_and_returns_exit_code(
-    tmp_path, monkeypatch
+    enc_file, monkeypatch
 ):
-    enc_file = tmp_path / "secrets.enc.yaml"
-    monkeypatch.setattr(lib, "SECRETS_ENC_FILE", enc_file)
-
     def fake_run(cmd, **kwargs):
         assert cmd == ["sops", str(enc_file)]
         assert "capture_output" not in kwargs  # inherits stdio for the editor session
@@ -542,10 +530,7 @@ def test_edit_secrets_file_runs_sops_on_the_file_and_returns_exit_code(
     assert lib.edit_secrets_file() == 0
 
 
-def test_edit_secrets_file_returns_nonzero_exit_code(tmp_path, monkeypatch):
-    enc_file = tmp_path / "secrets.enc.yaml"
-    monkeypatch.setattr(lib, "SECRETS_ENC_FILE", enc_file)
-
+def test_edit_secrets_file_returns_nonzero_exit_code(enc_file, monkeypatch):
     def fake_run(cmd, **kwargs):
         return subprocess.CompletedProcess(cmd, 1)
 
@@ -553,10 +538,7 @@ def test_edit_secrets_file_returns_nonzero_exit_code(tmp_path, monkeypatch):
     assert lib.edit_secrets_file() == 1
 
 
-def test_edit_secrets_file_raises_gh_error_when_sops_not_on_path(tmp_path, monkeypatch):
-    enc_file = tmp_path / "secrets.enc.yaml"
-    monkeypatch.setattr(lib, "SECRETS_ENC_FILE", enc_file)
-
+def test_edit_secrets_file_raises_gh_error_when_sops_not_on_path(enc_file, monkeypatch):
     def fake_run(cmd, **kwargs):
         raise FileNotFoundError("sops")
 

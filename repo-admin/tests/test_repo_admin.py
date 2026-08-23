@@ -19,6 +19,17 @@ class _PresentPath:
         return True
 
 
+def _capturing_list_repos():
+    seen = {}
+
+    async def fake_list_repos(owner, *, only=None, skip=None):
+        seen["only"] = only
+        seen["skip"] = skip
+        return []
+
+    return seen, fake_list_repos
+
+
 # ---------------------------------------------------------------------------
 # repos list
 # ---------------------------------------------------------------------------
@@ -42,13 +53,7 @@ async def test_cmd_repos_list_prints_a_row_per_repo(monkeypatch, capsys):
 
 
 async def test_cmd_repos_list_passes_through_repos_and_skip_filters(monkeypatch):
-    seen = {}
-
-    async def fake_list_repos(owner, *, only=None, skip=None):
-        seen["only"] = only
-        seen["skip"] = skip
-        return []
-
+    seen, fake_list_repos = _capturing_list_repos()
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
     args = argparse.Namespace(repos=["repo-a"], skip="repo-b")
     await repo_admin.cmd_repos_list(args)
@@ -107,16 +112,23 @@ def test_merge_settings_apply_line_changed():
     assert line == f"{'repo':<30} {before} -> {after}"
 
 
-async def test_merge_settings_worker_dry_run(monkeypatch):
+def _merge_settings_dry_run_worker(monkeypatch, settings):
     async def fake_merge_settings(owner, name):
-        return {
+        return settings
+
+    monkeypatch.setattr(repo_admin, "_merge_settings", fake_merge_settings)
+    return repo_admin.make_merge_settings_worker(owner="hugoh", dry_run=True)
+
+
+async def test_merge_settings_worker_dry_run(monkeypatch):
+    worker = _merge_settings_dry_run_worker(
+        monkeypatch,
+        {
             "allow_auto_merge": False,
             "delete_branch_on_merge": True,
             "allow_update_branch": True,
-        }
-
-    monkeypatch.setattr(repo_admin, "_merge_settings", fake_merge_settings)
-    worker = repo_admin.make_merge_settings_worker(owner="hugoh", dry_run=True)
+        },
+    )
     result = await worker(REPO)
     assert "would enable: allow_auto_merge" in result.line
 
@@ -142,28 +154,26 @@ def test_merge_settings_at_target_false_when_any_disabled():
 
 
 async def test_merge_settings_worker_dry_run_unchanged_when_at_target(monkeypatch):
-    async def fake_merge_settings(owner, name):
-        return {
+    worker = _merge_settings_dry_run_worker(
+        monkeypatch,
+        {
             "allow_auto_merge": True,
             "delete_branch_on_merge": True,
             "allow_update_branch": True,
-        }
-
-    monkeypatch.setattr(repo_admin, "_merge_settings", fake_merge_settings)
-    worker = repo_admin.make_merge_settings_worker(owner="hugoh", dry_run=True)
+        },
+    )
     assert (await worker(REPO)).status == Status.UNCHANGED
 
 
 async def test_merge_settings_worker_dry_run_ok_when_would_reach_target(monkeypatch):
-    async def fake_merge_settings(owner, name):
-        return {
+    worker = _merge_settings_dry_run_worker(
+        monkeypatch,
+        {
             "allow_auto_merge": False,
             "delete_branch_on_merge": True,
             "allow_update_branch": True,
-        }
-
-    monkeypatch.setattr(repo_admin, "_merge_settings", fake_merge_settings)
-    worker = repo_admin.make_merge_settings_worker(owner="hugoh", dry_run=True)
+        },
+    )
     assert (await worker(REPO)).status == Status.OK
 
 
@@ -196,15 +206,14 @@ def test_merge_settings_dry_run_line_would_enable_and_unavailable_together():
 async def test_merge_settings_worker_dry_run_limited_unchanged_on_private_repo_gate(
     monkeypatch,
 ):
-    async def fake_merge_settings(owner, name):
-        return {
+    worker = _merge_settings_dry_run_worker(
+        monkeypatch,
+        {
             "allow_auto_merge": False,
             "delete_branch_on_merge": True,
             "allow_update_branch": True,
-        }
-
-    monkeypatch.setattr(repo_admin, "_merge_settings", fake_merge_settings)
-    worker = repo_admin.make_merge_settings_worker(owner="hugoh", dry_run=True)
+        },
+    )
     result = await worker(PRIVATE_REPO)
     assert result.status == Status.LIMITED_UNCHANGED
     assert "would enable" not in result.line
@@ -214,15 +223,14 @@ async def test_merge_settings_worker_dry_run_limited_unchanged_on_private_repo_g
 async def test_merge_settings_worker_dry_run_limited_when_private_repo_has_fixable_field(
     monkeypatch,
 ):
-    async def fake_merge_settings(owner, name):
-        return {
+    worker = _merge_settings_dry_run_worker(
+        monkeypatch,
+        {
             "allow_auto_merge": False,
             "delete_branch_on_merge": False,
             "allow_update_branch": True,
-        }
-
-    monkeypatch.setattr(repo_admin, "_merge_settings", fake_merge_settings)
-    worker = repo_admin.make_merge_settings_worker(owner="hugoh", dry_run=True)
+        },
+    )
     result = await worker(PRIVATE_REPO)
     assert result.status == Status.LIMITED
     assert "would enable: delete_branch_on_merge" in result.line
@@ -568,25 +576,25 @@ async def test_check_run_contexts_keeps_legitimately_skipped_check(monkeypatch):
     assert contexts == ["hk / hk", "pages"]
 
 
-def test_branch_protection_up_to_date_matches_baseline():
-    current = {
-        "required_status_checks": {"contexts": ["build", "test"], "strict": True},
+def _protection_state(*, contexts=("build", "test"), **overrides):
+    state = {
+        "required_status_checks": {"contexts": list(contexts), "strict": True},
         "enforce_admins": {"enabled": True},
         "allow_force_pushes": {"enabled": False},
         "allow_deletions": {"enabled": False},
         "required_pull_request_reviews": {"required_approving_review_count": 0},
     }
+    state.update(overrides)
+    return state
+
+
+def test_branch_protection_up_to_date_matches_baseline():
+    current = _protection_state(contexts=["build", "test"])
     assert repo_admin.branch_protection_up_to_date(current, ["test", "build"]) is True
 
 
 def test_branch_protection_up_to_date_false_when_contexts_differ():
-    current = {
-        "required_status_checks": {"contexts": ["build"], "strict": True},
-        "enforce_admins": {"enabled": True},
-        "allow_force_pushes": {"enabled": False},
-        "allow_deletions": {"enabled": False},
-        "required_pull_request_reviews": {"required_approving_review_count": 0},
-    }
+    current = _protection_state(contexts=["build"])
     assert repo_admin.branch_protection_up_to_date(current, ["test", "build"]) is False
 
 
@@ -615,26 +623,52 @@ def test_branch_protection_payload_no_contexts_omits_required_status_checks():
 
 
 def test_branch_protection_up_to_date_true_with_no_contexts_and_none_required():
-    current = {
-        "required_status_checks": None,
-        "enforce_admins": {"enabled": True},
-        "allow_force_pushes": {"enabled": False},
-        "allow_deletions": {"enabled": False},
-        "required_pull_request_reviews": {"required_approving_review_count": 0},
-    }
+    current = _protection_state(required_status_checks=None)
     assert repo_admin.branch_protection_up_to_date(current, []) is True
 
 
-async def test_branch_protection_worker_dry_run_ok_when_no_prs(monkeypatch):
+def _branch_protection_worker(
+    monkeypatch,
+    *,
+    dry_run,
+    shas=(),
+    contexts=(),
+    current=None,
+    status_code=200,
+    track_calls=False,
+):
     async def fake_shas(owner, name):
-        return []
+        return list(shas)
 
-    async def fake_api_request(*a, **k):
-        return _FakeResponse(404)
+    async def fake_contexts(owner, name, shas):
+        return list(contexts)
+
+    if current is not None:
+
+        class _ProtectionResponse(_FakeResponse):
+            def json(self):
+                return current
+
+        response = _ProtectionResponse(status_code)
+    else:
+        response = _FakeResponse(status_code)
+
+    calls = [] if track_calls else None
+
+    async def fake_api_request(method, *a, **k):
+        if calls is not None:
+            calls.append(method)
+        return response
 
     monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", fake_shas)
+    monkeypatch.setattr(repo_admin, "_check_run_contexts", fake_contexts)
     monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
-    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=True)
+    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=dry_run)
+    return (worker, calls) if track_calls else worker
+
+
+async def test_branch_protection_worker_dry_run_ok_when_no_prs(monkeypatch):
+    worker = _branch_protection_worker(monkeypatch, dry_run=True, status_code=404)
     result = await worker(REPO)
     assert result.status == Status.OK
     assert "no pull requests found yet" in result.line
@@ -642,19 +676,9 @@ async def test_branch_protection_worker_dry_run_ok_when_no_prs(monkeypatch):
 
 
 async def test_branch_protection_worker_dry_run_ok_when_no_check_runs(monkeypatch):
-    async def fake_shas(owner, name):
-        return ["sha"]
-
-    async def fake_contexts(owner, name, shas):
-        return []
-
-    async def fake_api_request(*a, **k):
-        return _FakeResponse(404)
-
-    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", fake_shas)
-    monkeypatch.setattr(repo_admin, "_check_run_contexts", fake_contexts)
-    monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
-    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=True)
+    worker = _branch_protection_worker(
+        monkeypatch, dry_run=True, shas=["sha"], status_code=404
+    )
     result = await worker(REPO)
     assert result.status == Status.OK
     assert "no check runs found" in result.line
@@ -684,19 +708,9 @@ async def test_branch_protection_worker_apply_ok_when_no_prs_yet(monkeypatch):
 async def test_branch_protection_worker_dry_run_limited_unchanged_when_plan_gated(
     monkeypatch,
 ):
-    async def fake_shas(owner, name):
-        return ["sha"]
-
-    async def fake_contexts(owner, name, shas):
-        return ["build"]
-
-    async def fake_api_request(*a, **k):
-        return _FakeResponse(403)
-
-    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", fake_shas)
-    monkeypatch.setattr(repo_admin, "_check_run_contexts", fake_contexts)
-    monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
-    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=True)
+    worker = _branch_protection_worker(
+        monkeypatch, dry_run=True, shas=["sha"], contexts=["build"], status_code=403
+    )
     result = await worker(REPO)
     assert result.status == Status.LIMITED_UNCHANGED
     assert result.line == (
@@ -707,19 +721,9 @@ async def test_branch_protection_worker_dry_run_limited_unchanged_when_plan_gate
 async def test_branch_protection_worker_apply_limited_unchanged_when_plan_gated(
     monkeypatch,
 ):
-    async def fake_shas(owner, name):
-        return ["sha"]
-
-    async def fake_contexts(owner, name, shas):
-        return ["build"]
-
-    async def fake_api_request(*a, **k):
-        return _FakeResponse(403)
-
-    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", fake_shas)
-    monkeypatch.setattr(repo_admin, "_check_run_contexts", fake_contexts)
-    monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
-    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=False)
+    worker = _branch_protection_worker(
+        monkeypatch, dry_run=False, shas=["sha"], contexts=["build"], status_code=403
+    )
     result = await worker(REPO)
     assert result.status == Status.LIMITED_UNCHANGED
     assert result.line == (
@@ -728,31 +732,13 @@ async def test_branch_protection_worker_apply_limited_unchanged_when_plan_gated(
 
 
 async def test_branch_protection_worker_dry_run_unchanged_line(monkeypatch):
-    async def fake_shas(owner, name):
-        return ["sha"]
-
-    async def fake_contexts(owner, name, shas):
-        return ["build", "test"]
-
-    current = {
-        "required_status_checks": {"contexts": ["build", "test"], "strict": True},
-        "enforce_admins": {"enabled": True},
-        "allow_force_pushes": {"enabled": False},
-        "allow_deletions": {"enabled": False},
-        "required_pull_request_reviews": {"required_approving_review_count": 0},
-    }
-
-    class _ProtectionResponse(_FakeResponse):
-        def json(self):
-            return current
-
-    async def fake_api_request(*a, **k):
-        return _ProtectionResponse(200)
-
-    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", fake_shas)
-    monkeypatch.setattr(repo_admin, "_check_run_contexts", fake_contexts)
-    monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
-    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=True)
+    worker = _branch_protection_worker(
+        monkeypatch,
+        dry_run=True,
+        shas=["sha"],
+        contexts=["build", "test"],
+        current=_protection_state(contexts=["build", "test"]),
+    )
     result = await worker(REPO)
     assert result.status == Status.UNCHANGED
     assert result.line == f"{'repo':<30} unchanged: build, test"
@@ -761,34 +747,14 @@ async def test_branch_protection_worker_dry_run_unchanged_line(monkeypatch):
 async def test_branch_protection_worker_apply_unchanged_when_already_protected(
     monkeypatch,
 ):
-    async def fake_shas(owner, name):
-        return ["sha"]
-
-    async def fake_contexts(owner, name, shas):
-        return ["build", "test"]
-
-    current = {
-        "required_status_checks": {"contexts": ["build", "test"], "strict": True},
-        "enforce_admins": {"enabled": True},
-        "allow_force_pushes": {"enabled": False},
-        "allow_deletions": {"enabled": False},
-        "required_pull_request_reviews": {"required_approving_review_count": 0},
-    }
-
-    class _ProtectionResponse(_FakeResponse):
-        def json(self):
-            return current
-
-    calls = []
-
-    async def fake_api_request(method, *a, **k):
-        calls.append(method)
-        return _ProtectionResponse(200)
-
-    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", fake_shas)
-    monkeypatch.setattr(repo_admin, "_check_run_contexts", fake_contexts)
-    monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
-    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=False)
+    worker, calls = _branch_protection_worker(
+        monkeypatch,
+        dry_run=False,
+        shas=["sha"],
+        contexts=["build", "test"],
+        current=_protection_state(contexts=["build", "test"]),
+        track_calls=True,
+    )
     result = await worker(REPO)
     assert result.status == Status.UNCHANGED
     assert result.line == f"{'repo':<30} unchanged: build, test"
@@ -799,31 +765,13 @@ async def test_branch_protection_worker_apply_unchanged_when_already_protected(
 async def test_branch_protection_worker_apply_ok_when_updating_from_stale_state(
     monkeypatch,
 ):
-    async def fake_shas(owner, name):
-        return ["sha"]
-
-    async def fake_contexts(owner, name, shas):
-        return ["build", "test"]
-
-    current = {
-        "required_status_checks": {"contexts": ["build"], "strict": True},
-        "enforce_admins": {"enabled": True},
-        "allow_force_pushes": {"enabled": False},
-        "allow_deletions": {"enabled": False},
-        "required_pull_request_reviews": {"required_approving_review_count": 0},
-    }
-
-    class _ProtectionResponse(_FakeResponse):
-        def json(self):
-            return current
-
-    async def fake_api_request(*a, **k):
-        return _ProtectionResponse(200)
-
-    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", fake_shas)
-    monkeypatch.setattr(repo_admin, "_check_run_contexts", fake_contexts)
-    monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
-    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=False)
+    worker = _branch_protection_worker(
+        monkeypatch,
+        dry_run=False,
+        shas=["sha"],
+        contexts=["build", "test"],
+        current=_protection_state(contexts=["build"]),
+    )
     result = await worker(REPO)
     assert result.status == Status.OK
     assert result.line == f"{'repo':<30} protected (build, test)"
@@ -831,12 +779,7 @@ async def test_branch_protection_worker_apply_ok_when_updating_from_stale_state(
 
 
 async def test_cmd_protection_sync_merges_exclude_list_into_skip(monkeypatch):
-    seen = {}
-
-    async def fake_list_repos(owner, *, only=None, skip=None):
-        seen["skip"] = skip
-        return []
-
+    seen, fake_list_repos = _capturing_list_repos()
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
     monkeypatch.setattr(
         repo_admin, "default_branch_protection_exclude", lambda: {"homebrew-tap"}
@@ -847,12 +790,7 @@ async def test_cmd_protection_sync_merges_exclude_list_into_skip(monkeypatch):
 
 
 async def test_cmd_protection_sync_excludes_even_without_explicit_skip(monkeypatch):
-    seen = {}
-
-    async def fake_list_repos(owner, *, only=None, skip=None):
-        seen["skip"] = skip
-        return []
-
+    seen, fake_list_repos = _capturing_list_repos()
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
     monkeypatch.setattr(
         repo_admin, "default_branch_protection_exclude", lambda: {"homebrew-tap"}
@@ -1105,17 +1043,12 @@ async def test_pages_domain_worker_dry_run_limited_unchanged_when_cert_pending(
     assert result.status == Status.LIMITED_UNCHANGED
 
 
-async def test_pages_domain_worker_apply_sets_cname(monkeypatch):
+def _pages_domain_apply_worker(monkeypatch, responses):
     calls = []
-    responses = iter(
-        [
-            {"cname": None, "https_enforced": False},
-            {"cname": DOMAIN, "https_enforced": False},
-        ]
-    )
+    response_iter = iter(responses)
 
     async def fake_pages_config(owner, name):
-        return next(responses)
+        return next(response_iter)
 
     async def fake_api_json(method, path, **kwargs):
         calls.append((method, path, kwargs.get("json")))
@@ -1125,6 +1058,17 @@ async def test_pages_domain_worker_apply_sets_cname(monkeypatch):
     monkeypatch.setattr(repo_admin, "api_json", fake_api_json)
     worker = repo_admin.make_pages_domain_worker(
         owner="hugoh", dry_run=False, domains={"repo": DOMAIN}
+    )
+    return worker, calls
+
+
+async def test_pages_domain_worker_apply_sets_cname(monkeypatch):
+    worker, calls = _pages_domain_apply_worker(
+        monkeypatch,
+        [
+            {"cname": None, "https_enforced": False},
+            {"cname": DOMAIN, "https_enforced": False},
+        ],
     )
     result = await worker(REPO)
     assert result.status == Status.LIMITED
@@ -1132,8 +1076,8 @@ async def test_pages_domain_worker_apply_sets_cname(monkeypatch):
 
 
 async def test_pages_domain_worker_apply_enables_https_when_cert_ready(monkeypatch):
-    calls = []
-    responses = iter(
+    worker, calls = _pages_domain_apply_worker(
+        monkeypatch,
         [
             {
                 "cname": DOMAIN,
@@ -1141,20 +1085,7 @@ async def test_pages_domain_worker_apply_enables_https_when_cert_ready(monkeypat
                 "https_certificate": {"state": "approved"},
             },
             {"cname": DOMAIN, "https_enforced": True},
-        ]
-    )
-
-    async def fake_pages_config(owner, name):
-        return next(responses)
-
-    async def fake_api_json(method, path, **kwargs):
-        calls.append((method, path, kwargs.get("json")))
-        return {}
-
-    monkeypatch.setattr(repo_admin, "_pages_config", fake_pages_config)
-    monkeypatch.setattr(repo_admin, "api_json", fake_api_json)
-    worker = repo_admin.make_pages_domain_worker(
-        owner="hugoh", dry_run=False, domains={"repo": DOMAIN}
+        ],
     )
     result = await worker(REPO)
     assert result.status == Status.OK
@@ -1181,13 +1112,7 @@ async def test_cmd_pages_sync_defaults_to_mapped_repos(monkeypatch):
     monkeypatch.setattr(
         repo_admin.lib, "default_pages_domains", lambda: {"awesome-jj": DOMAIN}
     )
-    seen = {}
-
-    async def fake_list_repos(owner, *, only=None, skip=None):
-        seen["only"] = only
-        seen["skip"] = skip
-        return []
-
+    seen, fake_list_repos = _capturing_list_repos()
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
     args = argparse.Namespace(dry_run=True, repos=[], skip=None, verbose=False)
     assert await repo_admin.cmd_pages_sync(args) == 0
@@ -1400,6 +1325,16 @@ async def test_secrets_sync_worker_apply_calls_set_repo_secret(monkeypatch):
     assert calls == [("hugoh", "repo", "NAME", "the-value")]
 
 
+def _recording_list_repos():
+    seen_only = []
+
+    async def fake_list_repos(owner, *, only=None, skip=None):
+        seen_only.append(only)
+        return []
+
+    return seen_only, fake_list_repos
+
+
 async def test_cmd_secrets_sync_defaults_to_all_configured_secrets(monkeypatch):
     monkeypatch.setattr(
         repo_admin.lib,
@@ -1409,12 +1344,7 @@ async def test_cmd_secrets_sync_defaults_to_all_configured_secrets(monkeypatch):
     monkeypatch.setattr(
         repo_admin.lib, "decrypt_secrets", lambda: {"NAME_A": "va", "NAME_B": "vb"}
     )
-    seen_only = []
-
-    async def fake_list_repos(owner, *, only=None, skip=None):
-        seen_only.append(only)
-        return []
-
+    seen_only, fake_list_repos = _recording_list_repos()
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
     args = argparse.Namespace(
         dry_run=False, repos=[], skip=None, secret=None, verbose=False
@@ -1469,12 +1399,7 @@ async def test_cmd_secrets_sync_only_filters_within_each_secrets_repo_list(monke
     monkeypatch.setattr(
         repo_admin.lib, "decrypt_secrets", lambda: {"NAME_A": "va", "NAME_B": "vb"}
     )
-    seen_only = []
-
-    async def fake_list_repos(owner, *, only=None, skip=None):
-        seen_only.append(only)
-        return []
-
+    seen_only, fake_list_repos = _recording_list_repos()
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
     args = argparse.Namespace(
         dry_run=False, repos=["repo-shared"], skip=None, secret=None, verbose=False
@@ -1492,12 +1417,7 @@ async def test_cmd_secrets_sync_skips_secret_missing_from_encrypted_file(
         lambda: {"NAME_A": ["repo-a"], "NAME_B": ["repo-b"]},
     )
     monkeypatch.setattr(repo_admin.lib, "decrypt_secrets", lambda: {"NAME_B": "vb"})
-    processed = []
-
-    async def fake_list_repos(owner, *, only=None, skip=None):
-        processed.append(only)
-        return []
-
+    processed, fake_list_repos = _recording_list_repos()
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
     args = argparse.Namespace(
         dry_run=False, repos=[], skip=None, secret=None, verbose=False
