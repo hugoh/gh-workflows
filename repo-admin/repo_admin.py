@@ -112,6 +112,14 @@ async def cmd_repos_list(args: argparse.Namespace) -> int:
 # to date with the base branch (`strict: true`) -- without auto-update,
 # auto-merge PRs get stuck needing a manual "Update branch" click whenever
 # another PR merges first.
+#
+# allow_auto_merge on a private repo silently no-ops on this account's plan
+# (private-repo auto-merge needs GitHub Pro/Team/Enterprise) -- confirmed by
+# a live PATCH against a private repo returning 200 with the field still
+# false. GET always reports the real current value, so dry-run can't tell
+# this apart from "would enable" without attempting the write; instead it's
+# reported as unavailable, the same way security-features reports its own
+# plan-gated fields.
 # ---------------------------------------------------------------------------
 
 MERGE_SETTINGS_FIELDS = [
@@ -119,6 +127,10 @@ MERGE_SETTINGS_FIELDS = [
     "delete_branch_on_merge",
     "allow_update_branch",
 ]
+
+
+def _merge_gated_fields(*, is_private: bool) -> list[str]:
+    return ["allow_auto_merge"] if is_private else []
 
 
 async def _merge_settings(owner: str, name: str) -> dict:
@@ -130,11 +142,32 @@ def merge_settings_at_target(settings: dict) -> bool:
     return all(settings[field] for field in MERGE_SETTINGS_FIELDS)
 
 
-def merge_settings_dry_run_line(name: str, current: dict, status: Status) -> str:
-    would_enable = [field for field in MERGE_SETTINGS_FIELDS if not current[field]]
+def merge_settings_summarize(current: dict, *, is_private: bool = False) -> dict:
+    gated = set(_merge_gated_fields(is_private=is_private))
+    return {
+        "would_enable": [
+            field
+            for field in MERGE_SETTINGS_FIELDS
+            if field not in gated and not current[field]
+        ],
+        "unavailable": [
+            field
+            for field in MERGE_SETTINGS_FIELDS
+            if field in gated and not current[field]
+        ],
+    }
+
+
+def merge_settings_dry_run_line(
+    name: str, current: dict, status: Status, *, is_private: bool = False
+) -> str:
+    summary = merge_settings_summarize(current, is_private=is_private)
+    would_enable, unavailable = summary["would_enable"], summary["unavailable"]
     detail = (
         str(current) if not would_enable else f"would enable: {', '.join(would_enable)}"
     )
+    if unavailable:
+        detail += f" (unavailable: {', '.join(unavailable)})"
     return result_line(name, detail, status)
 
 
@@ -149,11 +182,21 @@ def make_merge_settings_worker(owner: str, dry_run: bool):
     async def worker(repo: Repo) -> RepoResult:
         if dry_run:
             current = await _merge_settings(owner, repo.name)
-            status = (
-                Status.UNCHANGED if merge_settings_at_target(current) else Status.OK
-            )
+            summary = merge_settings_summarize(current, is_private=repo.is_private)
+            if summary["would_enable"]:
+                status = Status.LIMITED if summary["unavailable"] else Status.OK
+            else:
+                status = (
+                    Status.LIMITED_UNCHANGED
+                    if summary["unavailable"]
+                    else Status.UNCHANGED
+                )
             return RepoResult(
-                repo, merge_settings_dry_run_line(repo.name, current, status), status
+                repo,
+                merge_settings_dry_run_line(
+                    repo.name, current, status, is_private=repo.is_private
+                ),
+                status,
             )
 
         before = await _merge_settings(owner, repo.name)

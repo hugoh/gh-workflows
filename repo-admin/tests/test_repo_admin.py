@@ -4,6 +4,7 @@ import repo_admin
 from lib import GhError, Repo, Status
 
 REPO = Repo(name="repo", default_branch="main", is_private=False, is_fork=False)
+PRIVATE_REPO = Repo(name="repo", default_branch="main", is_private=True, is_fork=False)
 
 
 class _MissingPath:
@@ -164,6 +165,68 @@ async def test_merge_settings_worker_dry_run_ok_when_would_reach_target(monkeypa
     monkeypatch.setattr(repo_admin, "_merge_settings", fake_merge_settings)
     worker = repo_admin.make_merge_settings_worker(owner="hugoh", dry_run=True)
     assert (await worker(REPO)).status == Status.OK
+
+
+def test_merge_settings_dry_run_line_marks_gated_field_unavailable():
+    current = {
+        "allow_auto_merge": False,
+        "delete_branch_on_merge": True,
+        "allow_update_branch": True,
+    }
+    line = repo_admin.merge_settings_dry_run_line(
+        "repo", current, Status.LIMITED_UNCHANGED, is_private=True
+    )
+    assert "would enable" not in line
+    assert "(unavailable: allow_auto_merge)" in line
+
+
+def test_merge_settings_dry_run_line_would_enable_and_unavailable_together():
+    current = {
+        "allow_auto_merge": False,
+        "delete_branch_on_merge": False,
+        "allow_update_branch": True,
+    }
+    line = repo_admin.merge_settings_dry_run_line(
+        "repo", current, Status.LIMITED, is_private=True
+    )
+    assert "would enable: delete_branch_on_merge" in line
+    assert "(unavailable: allow_auto_merge)" in line
+
+
+async def test_merge_settings_worker_dry_run_limited_unchanged_on_private_repo_gate(
+    monkeypatch,
+):
+    async def fake_merge_settings(owner, name):
+        return {
+            "allow_auto_merge": False,
+            "delete_branch_on_merge": True,
+            "allow_update_branch": True,
+        }
+
+    monkeypatch.setattr(repo_admin, "_merge_settings", fake_merge_settings)
+    worker = repo_admin.make_merge_settings_worker(owner="hugoh", dry_run=True)
+    result = await worker(PRIVATE_REPO)
+    assert result.status == Status.LIMITED_UNCHANGED
+    assert "would enable" not in result.line
+    assert "unavailable: allow_auto_merge" in result.line
+
+
+async def test_merge_settings_worker_dry_run_limited_when_private_repo_has_fixable_field(
+    monkeypatch,
+):
+    async def fake_merge_settings(owner, name):
+        return {
+            "allow_auto_merge": False,
+            "delete_branch_on_merge": False,
+            "allow_update_branch": True,
+        }
+
+    monkeypatch.setattr(repo_admin, "_merge_settings", fake_merge_settings)
+    worker = repo_admin.make_merge_settings_worker(owner="hugoh", dry_run=True)
+    result = await worker(PRIVATE_REPO)
+    assert result.status == Status.LIMITED
+    assert "would enable: delete_branch_on_merge" in result.line
+    assert "unavailable: allow_auto_merge" in result.line
 
 
 def _merge_settings_apply_worker(monkeypatch, before, after):
