@@ -984,6 +984,10 @@ async def cmd_secrets_sync(args: argparse.Namespace) -> int:
         if skip:
             target_repos -= skip
 
+        if not target_repos:
+            print(f"== {secret_name} == (no matching repos, skipping)")
+            continue
+
         if not args.dry_run and secret_name not in values:
             print(
                 f"error: {secret_name!r} has no value in config/secrets.enc.yaml",

@@ -1423,6 +1423,24 @@ async def test_cmd_secrets_sync_defaults_to_all_configured_secrets(monkeypatch):
     assert sorted(seen_only, key=str) == [{"repo-a"}, {"repo-b"}]
 
 
+async def test_cmd_secrets_sync_skips_secret_when_filters_leave_no_repos(monkeypatch):
+    monkeypatch.setattr(
+        repo_admin.lib, "default_secrets", lambda: {"NAME_A": ["repo-a"]}
+    )
+    monkeypatch.setattr(repo_admin.lib, "decrypt_secrets", lambda: {"NAME_A": "va"})
+
+    async def fake_list_repos(owner, *, only=None, skip=None):
+        raise AssertionError(
+            "must not call list_repos when the target repo set is empty"
+        )
+
+    monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
+    args = argparse.Namespace(
+        dry_run=False, repos=[], skip="repo-a", secret=None, verbose=False
+    )
+    assert await repo_admin.cmd_secrets_sync(args) == 0
+
+
 async def test_cmd_secrets_sync_errors_on_unknown_secret_name(monkeypatch, capsys):
     monkeypatch.setattr(
         repo_admin.lib, "default_secrets", lambda: {"NAME_A": ["repo-a"]}
