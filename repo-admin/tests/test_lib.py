@@ -19,6 +19,7 @@ from lib import (
     fetch_repos_json,
     filter_repos,
     print_status,
+    public_repos_json,
     result_line,
     run_parallel,
     unmatched_include_forks,
@@ -695,3 +696,32 @@ async def test_fetch_repos_json_follows_pagination_link_header(
         )
     )
     assert await fetch_repos_json("hugoh") == [{"name": "page1"}, {"name": "page2"}]
+
+
+async def test_public_repos_json_uses_public_users_endpoint_even_for_self(
+    httpx2_mock: respx.Router,
+):
+    # /users/{owner}/repos only ever returns public repos, even when owner is
+    # the authenticated user -- unlike fetch_repos_json, no /user call is
+    # needed to check whether owner is the viewer.
+    httpx2_mock.get(f"{API_BASE}/users/hugoh/repos").mock(
+        return_value=httpx.Response(200, json=[{"name": "public-repo"}])
+    )
+    assert await public_repos_json("hugoh") == [{"name": "public-repo"}]
+    assert not any(call.request.url.path == "/user" for call in httpx2_mock.calls)
+
+
+async def test_public_repos_json_follows_pagination_link_header(
+    httpx2_mock: respx.Router,
+):
+    httpx2_mock.get(f"{API_BASE}/users/hugoh/repos", params={"page": "2"}).mock(
+        return_value=httpx.Response(200, json=[{"name": "page2"}])
+    )
+    httpx2_mock.get(f"{API_BASE}/users/hugoh/repos").mock(
+        return_value=httpx.Response(
+            200,
+            json=[{"name": "page1"}],
+            headers={"Link": f'<{API_BASE}/users/hugoh/repos?page=2>; rel="next"'},
+        )
+    )
+    assert await public_repos_json("hugoh") == [{"name": "page1"}, {"name": "page2"}]
