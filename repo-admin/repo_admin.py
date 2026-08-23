@@ -79,6 +79,15 @@ class Tag(enum.StrEnum):
     UNAVAILABLE = "unavailable"
 
 
+async def list_repos_for_args(
+    args: argparse.Namespace, *, extra_skip: set[str] | None = None
+) -> list[Repo]:
+    skip = as_set(args.skip) or set()
+    if extra_skip:
+        skip |= extra_skip
+    return await list_repos(DEFAULT_OWNER, only=set(args.repos) or None, skip=skip)
+
+
 # ---------------------------------------------------------------------------
 # repos list
 # ---------------------------------------------------------------------------
@@ -87,9 +96,7 @@ class Tag(enum.StrEnum):
 async def cmd_repos_list(args: argparse.Namespace) -> int:
     with lib.progress_bar(transient=True) as progress:
         progress.add_task("Fetching repos...", total=None)
-        repos = await list_repos(
-            DEFAULT_OWNER, only=set(args.repos) or None, skip=as_set(args.skip)
-        )
+        repos = await list_repos_for_args(args)
 
     table = Table()
     table.add_column("NAME")
@@ -217,9 +224,7 @@ def make_merge_settings_worker(owner: str, dry_run: bool):
 
 
 async def cmd_merge_sync(args: argparse.Namespace) -> int:
-    repos = await list_repos(
-        DEFAULT_OWNER, only=set(args.repos) or None, skip=as_set(args.skip)
-    )
+    repos = await list_repos_for_args(args)
     await run_parallel(
         repos,
         make_merge_settings_worker(DEFAULT_OWNER, args.dry_run),
@@ -388,9 +393,7 @@ def make_security_features_worker(owner: str, dry_run: bool):
 
 
 async def cmd_security_sync(args: argparse.Namespace) -> int:
-    repos = await list_repos(
-        DEFAULT_OWNER, only=set(args.repos) or None, skip=as_set(args.skip)
-    )
+    repos = await list_repos_for_args(args)
     results = await run_parallel(
         repos,
         make_security_features_worker(DEFAULT_OWNER, args.dry_run),
@@ -632,8 +635,9 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
 
 
 async def cmd_protection_sync(args: argparse.Namespace) -> int:
-    skip = (as_set(args.skip) or set()) | default_branch_protection_exclude()
-    repos = await list_repos(DEFAULT_OWNER, only=set(args.repos) or None, skip=skip)
+    repos = await list_repos_for_args(
+        args, extra_skip=default_branch_protection_exclude()
+    )
     results = await run_parallel(
         repos,
         make_branch_protection_worker(DEFAULT_OWNER, args.dry_run),
@@ -849,9 +853,7 @@ async def _pages_enabled_repos(repos: list[Repo]) -> list[tuple[Repo, dict]]:
 async def cmd_pages_status(args: argparse.Namespace) -> int:
     with lib.progress_bar(transient=True) as progress:
         progress.add_task("Fetching repos...", total=None)
-        repos = await list_repos(
-            DEFAULT_OWNER, only=set(args.repos) or None, skip=as_set(args.skip)
-        )
+        repos = await list_repos_for_args(args)
 
     enabled = await _pages_enabled_repos(repos)
     domains = lib.default_pages_domains()
