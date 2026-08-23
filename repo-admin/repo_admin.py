@@ -19,6 +19,11 @@ Commands:
   pages-domain-config print pages-domains.yaml entries to stdout for a base
                        domain (--domain), for --only repos or, if omitted,
                        repos pages-status would flag as unmapped
+  secrets-sync         push shared GitHub Actions secrets (secrets.yaml ->
+                       repos, values from sops-encrypted secrets.enc.yaml)
+                       to each configured repo
+  secrets-edit         open secrets.enc.yaml in `sops` for interactive
+                       editing, seeding it from secrets.yaml the first time
 
 Forks are excluded by default -- except those listed in include-forks.txt;
 edit that file to add more, or override per-run with GH_INCLUDE_FORKS
@@ -35,6 +40,7 @@ import enum
 import sys
 
 import lib
+import yaml
 from lib import (
     DEFAULT_JOBS,
     DEFAULT_OWNER,
@@ -853,6 +859,146 @@ async def cmd_pages_domain_config(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# secrets-sync
+#
+# Pushes shared GitHub Actions secrets (e.g. TAP_GITHUB_TOKEN) to their
+# configured repos, via GitHub's REST API (lib.set_repo_secret, using
+# PyNaCl to encrypt for each repo's public key) -- consistent with every
+# other mutating command here, unlike shelling out to `gh secret set`.
+# Secret names -> target repos come from secrets.yaml (git-committed,
+# plaintext); values come from secrets.enc.yaml, decrypted once via
+# `sops -d` at the start of the run.
+#
+# GitHub's API never returns a secret's existing value (only its
+# last-updated timestamp, not a meaningful diff signal here), so there's no
+# "unchanged" detection -- every apply run is an unconditional set, and
+# dry-run just reports what would be set.
+#
+# A secret maps to many repos and a repo can receive multiple secrets, so
+# this loops per-secret (its own list_repos + run_parallel call each) --
+# the same non-aborting chaining cmd_all does across sub-commands, so one
+# secret's failure doesn't stop the next secret's sync.
+# ---------------------------------------------------------------------------
+
+
+def secrets_sync_line(secret_name: str, repo_name: str, *, dry_run: bool) -> str:
+    detail = f"would set {secret_name}" if dry_run else f"set {secret_name}"
+    return result_line(repo_name, detail, Status.OK)
+
+
+def make_secrets_sync_worker(owner: str, dry_run: bool, secret_name: str, value: str):
+    async def worker(repo: Repo) -> RepoResult:
+        line = secrets_sync_line(secret_name, repo.name, dry_run=dry_run)
+        if not dry_run:
+            await lib.set_repo_secret(owner, repo.name, secret_name, value)
+        return RepoResult(repo, line, Status.OK)
+
+    return worker
+
+
+async def cmd_secrets_sync(args: argparse.Namespace) -> int:
+    config = lib.default_secrets()
+    secret_names = as_set(args.secret)
+    if secret_names:
+        unknown = secret_names - set(config)
+        if unknown:
+            print(
+                f"error: not in secrets.yaml: {', '.join(sorted(unknown))}",
+                file=sys.stderr,
+            )
+            return 1
+    else:
+        secret_names = set(config)
+
+    values = lib.decrypt_secrets() if not args.dry_run else {}
+
+    only = as_set(args.only)
+    skip = as_set(args.skip)
+    failed = False
+    for secret_name in sorted(secret_names):
+        target_repos = set(config[secret_name])
+        if only:
+            target_repos &= only
+        if skip:
+            target_repos -= skip
+
+        if not args.dry_run and secret_name not in values:
+            print(
+                f"error: {secret_name!r} has no value in secrets.enc.yaml",
+                file=sys.stderr,
+            )
+            failed = True
+            continue
+
+        print(f"== {secret_name} ==")
+        repos = await list_repos(DEFAULT_OWNER, only=target_repos)
+        try:
+            await run_parallel(
+                repos,
+                make_secrets_sync_worker(
+                    DEFAULT_OWNER,
+                    args.dry_run,
+                    secret_name,
+                    values.get(secret_name, ""),
+                ),
+            )
+        except GhError as exc:
+            print(exc, file=sys.stderr)
+            failed = True
+
+    return 1 if failed else 0
+
+
+# ---------------------------------------------------------------------------
+# secrets-edit
+#
+# Opens secrets.enc.yaml in `sops` for interactive editing (decrypts to
+# $EDITOR, re-encrypts on save) -- the first time, seeds it pre-populated
+# with every secrets.yaml key (empty values) so there's something to fill
+# in rather than requiring the user to hand-write sops' metadata block.
+# After editing, warns about drift against secrets.yaml: a configured
+# secret with no value set, or a value left over from a removed/renamed
+# secret.
+# ---------------------------------------------------------------------------
+
+
+def secrets_edit_template(secret_names: set[str]) -> str:
+    return yaml.safe_dump({name: "" for name in sorted(secret_names)}, sort_keys=False)
+
+
+async def cmd_secrets_edit(args: argparse.Namespace) -> int:
+    secret_names = set(lib.default_secrets())
+    if not secret_names:
+        print("error: no secrets configured in secrets.yaml", file=sys.stderr)
+        return 1
+
+    if not lib.SECRETS_ENC_FILE.exists():
+        print(f"creating {lib.SECRETS_ENC_FILE.name}...")
+        lib.init_secrets_file(secrets_edit_template(secret_names))
+
+    if lib.edit_secrets_file() != 0:
+        print(
+            "error: sops exited with a nonzero status; changes may not be saved",
+            file=sys.stderr,
+        )
+        return 1
+
+    values = lib.decrypt_secrets()
+    missing = secret_names - set(values)
+    stale = set(values) - secret_names
+    if missing:
+        print(
+            f"warning: no value set for: {', '.join(sorted(missing))}", file=sys.stderr
+        )
+    if stale:
+        print(
+            f"warning: not in secrets.yaml (stale?): {', '.join(sorted(stale))}",
+            file=sys.stderr,
+        )
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # all
 # ---------------------------------------------------------------------------
 
@@ -926,6 +1072,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--domain", required=True, help="base domain, e.g. larve.net"
     )
     pages_domain_config_parser.set_defaults(func=cmd_pages_domain_config)
+
+    secrets_sync_parser = subparsers.add_parser(
+        "secrets-sync", parents=[mutating_parent]
+    )
+    secrets_sync_parser.add_argument(
+        "--secret",
+        help="comma-separated secret names to sync (default: all in secrets.yaml)",
+    )
+    secrets_sync_parser.set_defaults(func=cmd_secrets_sync)
+
+    subparsers.add_parser("secrets-edit").set_defaults(func=cmd_secrets_edit)
 
     return parser
 

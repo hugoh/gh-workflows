@@ -108,6 +108,34 @@ uv run repo_admin.py <command> [--dry-run] [--only name1,name2] [--skip name1,na
   with no API calls; with neither `--only`/`--skip`, auto-discovers repos
   with Pages enabled but missing from `pages-domains.yaml` (the same set
   `pages-status` flags) and suggests entries for those.
+- **`secrets-sync [--dry-run] [--secret name1,name2]`** — pushes shared
+  GitHub Actions secrets (name → target-repo list in `secrets.yaml`, values
+  sops-encrypted in `secrets.enc.yaml`) to each configured repo via
+  GitHub's REST API, encrypting each value in-process with PyNaCl for the
+  target repo's public key — the plaintext value is never written to disk
+  or passed as a subprocess argument. `--only`/`--skip` filter repo names
+  *within* each secret's configured repo list, same as every other
+  command; `--secret` narrows which secret names from `secrets.yaml` to
+  sync (defaults to all of them). GitHub's API never returns a secret's
+  existing value, so there's no unchanged/changed detection —
+  `--dry-run` just reports which repos would receive each secret.
+  Decrypting `secrets.enc.yaml` requires `sops` on `PATH` with access to
+  the shared age key; encrypt a new/updated value yourself, e.g.:
+
+  ```text
+  cd repo-admin
+  sops --encrypt --input-type yaml --output-type yaml \
+    <(echo "TAP_GITHUB_TOKEN: <value>") > secrets.enc.yaml
+  ```
+
+- **`secrets-edit`** — opens `secrets.enc.yaml` in `sops` for interactive
+  editing (decrypts to `$EDITOR`, re-encrypts on save) — an alternative to
+  the `sops --encrypt` one-liner above. The first time, seeds the file
+  pre-populated with every `secrets.yaml` key (empty values) so there's
+  something to fill in instead of hand-writing sops' metadata block. After
+  editing, warns (doesn't fail) about drift against `secrets.yaml`: a
+  configured secret left with no value, or a value left over from a
+  removed/renamed secret.
 
 Run a mutating command with `--dry-run` first and review the output before
 applying. Tests: `cd repo-admin && uv run pytest`.

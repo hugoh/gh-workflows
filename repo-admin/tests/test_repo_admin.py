@@ -6,6 +6,18 @@ from lib import GhError, Repo, Status
 REPO = Repo(name="repo", default_branch="main", is_private=False, is_fork=False)
 
 
+class _MissingPath:
+    name = "secrets.enc.yaml"
+
+    def exists(self):
+        return False
+
+
+class _PresentPath:
+    def exists(self):
+        return True
+
+
 # ---------------------------------------------------------------------------
 # list
 # ---------------------------------------------------------------------------
@@ -1256,3 +1268,245 @@ def test_pages_domain_config_subcommand_is_registered_in_parser():
     )
     assert args.func == repo_admin.cmd_pages_domain_config
     assert args.domain == "larve.net"
+
+
+# ---------------------------------------------------------------------------
+# secrets-sync
+# ---------------------------------------------------------------------------
+
+
+def test_secrets_sync_line_dry_run():
+    assert repo_admin.secrets_sync_line("NAME", "repo", dry_run=True) == (
+        f"{'repo':<30} would set NAME"
+    )
+
+
+def test_secrets_sync_line_apply():
+    assert repo_admin.secrets_sync_line("NAME", "repo", dry_run=False) == (
+        f"{'repo':<30} set NAME"
+    )
+
+
+async def test_secrets_sync_worker_dry_run_does_not_call_set_repo_secret(monkeypatch):
+    async def fail_set_repo_secret(*a, **k):
+        raise AssertionError("dry-run should not call set_repo_secret")
+
+    monkeypatch.setattr(repo_admin.lib, "set_repo_secret", fail_set_repo_secret)
+    worker = repo_admin.make_secrets_sync_worker(
+        owner="hugoh", dry_run=True, secret_name="NAME", value="the-value"
+    )
+    result = await worker(REPO)
+    assert result.status == Status.OK
+    assert "would set NAME" in result.line
+
+
+async def test_secrets_sync_worker_apply_calls_set_repo_secret(monkeypatch):
+    calls = []
+
+    async def fake_set_repo_secret(owner, repo_name, secret_name, value):
+        calls.append((owner, repo_name, secret_name, value))
+
+    monkeypatch.setattr(repo_admin.lib, "set_repo_secret", fake_set_repo_secret)
+    worker = repo_admin.make_secrets_sync_worker(
+        owner="hugoh", dry_run=False, secret_name="NAME", value="the-value"
+    )
+    result = await worker(REPO)
+    assert result.status == Status.OK
+    assert calls == [("hugoh", "repo", "NAME", "the-value")]
+
+
+async def test_cmd_secrets_sync_defaults_to_all_configured_secrets(monkeypatch):
+    monkeypatch.setattr(
+        repo_admin.lib,
+        "default_secrets",
+        lambda: {"NAME_A": ["repo-a"], "NAME_B": ["repo-b"]},
+    )
+    monkeypatch.setattr(
+        repo_admin.lib, "decrypt_secrets", lambda: {"NAME_A": "va", "NAME_B": "vb"}
+    )
+    seen_only = []
+
+    async def fake_list_repos(owner, *, only=None, skip=None):
+        seen_only.append(only)
+        return []
+
+    monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
+    args = argparse.Namespace(dry_run=False, only=None, skip=None, secret=None)
+    assert await repo_admin.cmd_secrets_sync(args) == 0
+    assert sorted(seen_only, key=str) == [{"repo-a"}, {"repo-b"}]
+
+
+async def test_cmd_secrets_sync_errors_on_unknown_secret_name(monkeypatch, capsys):
+    monkeypatch.setattr(
+        repo_admin.lib, "default_secrets", lambda: {"NAME_A": ["repo-a"]}
+    )
+
+    def fail_decrypt_secrets():
+        raise AssertionError("should not decrypt when --secret is unknown")
+
+    monkeypatch.setattr(repo_admin.lib, "decrypt_secrets", fail_decrypt_secrets)
+    args = argparse.Namespace(
+        dry_run=True, only=None, skip=None, secret="NOT_CONFIGURED"
+    )
+    assert await repo_admin.cmd_secrets_sync(args) == 1
+    assert "NOT_CONFIGURED" in capsys.readouterr().err
+
+
+async def test_cmd_secrets_sync_only_filters_within_each_secrets_repo_list(monkeypatch):
+    monkeypatch.setattr(
+        repo_admin.lib,
+        "default_secrets",
+        lambda: {
+            "NAME_A": ["repo-a", "repo-shared"],
+            "NAME_B": ["repo-b", "repo-shared"],
+        },
+    )
+    monkeypatch.setattr(
+        repo_admin.lib, "decrypt_secrets", lambda: {"NAME_A": "va", "NAME_B": "vb"}
+    )
+    seen_only = []
+
+    async def fake_list_repos(owner, *, only=None, skip=None):
+        seen_only.append(only)
+        return []
+
+    monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
+    args = argparse.Namespace(dry_run=False, only="repo-shared", skip=None, secret=None)
+    assert await repo_admin.cmd_secrets_sync(args) == 0
+    assert sorted(seen_only, key=str) == [{"repo-shared"}, {"repo-shared"}]
+
+
+async def test_cmd_secrets_sync_skips_secret_missing_from_encrypted_file(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        repo_admin.lib,
+        "default_secrets",
+        lambda: {"NAME_A": ["repo-a"], "NAME_B": ["repo-b"]},
+    )
+    monkeypatch.setattr(repo_admin.lib, "decrypt_secrets", lambda: {"NAME_B": "vb"})
+    processed = []
+
+    async def fake_list_repos(owner, *, only=None, skip=None):
+        processed.append(only)
+        return []
+
+    monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
+    args = argparse.Namespace(dry_run=False, only=None, skip=None, secret=None)
+    assert await repo_admin.cmd_secrets_sync(args) == 1
+    err = capsys.readouterr().err
+    assert "NAME_A" in err
+    assert processed == [{"repo-b"}]
+
+
+async def test_cmd_secrets_sync_dry_run_never_calls_decrypt_secrets(monkeypatch):
+    monkeypatch.setattr(
+        repo_admin.lib, "default_secrets", lambda: {"NAME_A": ["repo-a"]}
+    )
+
+    def fail_decrypt_secrets():
+        raise AssertionError("dry-run should not call decrypt_secrets")
+
+    monkeypatch.setattr(repo_admin.lib, "decrypt_secrets", fail_decrypt_secrets)
+
+    async def fake_list_repos(owner, *, only=None, skip=None):
+        return []
+
+    monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
+    args = argparse.Namespace(dry_run=True, only=None, skip=None, secret=None)
+    assert await repo_admin.cmd_secrets_sync(args) == 0
+
+
+def test_secrets_sync_subcommand_is_registered_in_parser():
+    args = repo_admin.build_parser().parse_args(
+        ["secrets-sync", "--dry-run", "--secret", "NAME"]
+    )
+    assert args.func == repo_admin.cmd_secrets_sync
+    assert args.secret == "NAME"
+
+
+# ---------------------------------------------------------------------------
+# secrets-edit
+# ---------------------------------------------------------------------------
+
+
+def test_secrets_edit_template_seeds_empty_values_for_each_name():
+    assert repo_admin.secrets_edit_template({"NAME_B", "NAME_A"}) == (
+        "NAME_A: ''\nNAME_B: ''\n"
+    )
+
+
+async def test_cmd_secrets_edit_errors_when_no_secrets_configured(monkeypatch, capsys):
+    monkeypatch.setattr(repo_admin.lib, "default_secrets", dict)
+    args = argparse.Namespace()
+    assert await repo_admin.cmd_secrets_edit(args) == 1
+    assert "no secrets configured" in capsys.readouterr().err
+
+
+async def test_cmd_secrets_edit_seeds_file_when_missing(monkeypatch):
+    monkeypatch.setattr(repo_admin.lib, "default_secrets", lambda: {"NAME": ["repo-a"]})
+    monkeypatch.setattr(repo_admin.lib, "SECRETS_ENC_FILE", _MissingPath())
+    seeded = []
+    monkeypatch.setattr(repo_admin.lib, "init_secrets_file", seeded.append)
+    monkeypatch.setattr(repo_admin.lib, "edit_secrets_file", lambda: 0)
+    monkeypatch.setattr(repo_admin.lib, "decrypt_secrets", lambda: {"NAME": "v"})
+
+    args = argparse.Namespace()
+    assert await repo_admin.cmd_secrets_edit(args) == 0
+    assert seeded == ["NAME: ''\n"]
+
+
+async def test_cmd_secrets_edit_does_not_seed_file_when_already_present(monkeypatch):
+    monkeypatch.setattr(repo_admin.lib, "default_secrets", lambda: {"NAME": ["repo-a"]})
+    monkeypatch.setattr(repo_admin.lib, "SECRETS_ENC_FILE", _PresentPath())
+
+    def fail_init(*a, **k):
+        raise AssertionError("should not seed when the file already exists")
+
+    monkeypatch.setattr(repo_admin.lib, "init_secrets_file", fail_init)
+    monkeypatch.setattr(repo_admin.lib, "edit_secrets_file", lambda: 0)
+    monkeypatch.setattr(repo_admin.lib, "decrypt_secrets", lambda: {"NAME": "v"})
+
+    args = argparse.Namespace()
+    assert await repo_admin.cmd_secrets_edit(args) == 0
+
+
+async def test_cmd_secrets_edit_returns_error_when_sops_exits_nonzero(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(repo_admin.lib, "default_secrets", lambda: {"NAME": ["repo-a"]})
+    monkeypatch.setattr(repo_admin.lib, "SECRETS_ENC_FILE", _PresentPath())
+    monkeypatch.setattr(repo_admin.lib, "edit_secrets_file", lambda: 1)
+
+    def fail_decrypt():
+        raise AssertionError("should not validate when the edit itself failed")
+
+    monkeypatch.setattr(repo_admin.lib, "decrypt_secrets", fail_decrypt)
+
+    args = argparse.Namespace()
+    assert await repo_admin.cmd_secrets_edit(args) == 1
+    assert "sops" in capsys.readouterr().err
+
+
+async def test_cmd_secrets_edit_warns_about_missing_and_stale_keys(monkeypatch, capsys):
+    monkeypatch.setattr(
+        repo_admin.lib,
+        "default_secrets",
+        lambda: {"NAME_A": ["repo-a"], "NAME_B": ["repo-b"]},
+    )
+    monkeypatch.setattr(repo_admin.lib, "SECRETS_ENC_FILE", _PresentPath())
+    monkeypatch.setattr(repo_admin.lib, "edit_secrets_file", lambda: 0)
+    monkeypatch.setattr(
+        repo_admin.lib, "decrypt_secrets", lambda: {"NAME_A": "v", "OLD_NAME": "stale"}
+    )
+
+    args = argparse.Namespace()
+    assert await repo_admin.cmd_secrets_edit(args) == 0
+    err = capsys.readouterr().err
+    assert "NAME_B" in err
+    assert "OLD_NAME" in err
+
+
+def test_secrets_edit_subcommand_is_registered_in_parser():
+    args = repo_admin.build_parser().parse_args(["secrets-edit"])
+    assert args.func == repo_admin.cmd_secrets_edit
