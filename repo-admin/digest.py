@@ -303,7 +303,7 @@ async def fetch_releases(
 # render_html
 # ---------------------------------------------------------------------------
 
-_TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+_TEMPLATES_DIR = Path(__file__).resolve().parent / "config" / "templates"
 _jinja_env = Environment(
     loader=FileSystemLoader(_TEMPLATES_DIR),
     autoescape=select_autoescape(["html", "jinja"]),

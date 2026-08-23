@@ -19,14 +19,15 @@ from rich.console import Console
 from rich.progress import Progress
 
 LIB_DIR = Path(__file__).resolve().parent
+CONFIG_DIR = LIB_DIR / "config"
 API_BASE = "https://api.github.com"
 DEFAULT_OWNER = os.environ.get("GH_OWNER", "hugoh")
 DEFAULT_JOBS = int(os.environ.get("GH_JOBS", "6"))
-PAGES_DOMAINS_FILE = LIB_DIR / "pages-domains.yaml"
-BRANCH_PROTECTION_EXCLUDE_FILE = LIB_DIR / "branch-protection-exclude.txt"
-SECRETS_FILE = LIB_DIR / "secrets.yaml"
-SECRETS_ENC_FILE = LIB_DIR / "secrets.enc.yaml"
-SOPS_CONFIG_FILE = LIB_DIR / ".sops.yaml"
+PAGES_DOMAINS_FILE = CONFIG_DIR / "pages-domains.yaml"
+BRANCH_PROTECTION_EXCLUDE_FILE = CONFIG_DIR / "branch-protection-exclude.txt"
+SECRETS_FILE = CONFIG_DIR / "secrets.yaml"
+SECRETS_ENC_FILE = CONFIG_DIR / "secrets.enc.yaml"
+SOPS_CONFIG_FILE = CONFIG_DIR / ".sops.yaml"
 
 console = Console()
 
@@ -241,7 +242,7 @@ def default_include_forks() -> set[str]:
     env_value = os.environ.get("GH_INCLUDE_FORKS")
     if env_value is not None:
         return as_set(env_value) or set()
-    forks_file = LIB_DIR / "include-forks.txt"
+    forks_file = CONFIG_DIR / "include-forks.txt"
     forks = set()
     for line in forks_file.read_text().splitlines():
         stripped = line.strip()
@@ -304,7 +305,7 @@ def decrypt_secrets() -> dict[str, str]:
     if not SECRETS_ENC_FILE.exists():
         raise GhError(
             f"{SECRETS_ENC_FILE.name} not found -- create it with `sops` "
-            "(see repo-admin/.sops.yaml)"
+            "(see repo-admin/config/.sops.yaml)"
         )
     try:
         result = subprocess.run(
@@ -465,8 +466,11 @@ def as_set(value: str | None) -> set[str] | None:
     return {v.strip() for v in value.split(",") if v.strip()}
 
 
+_QUIET_STATUSES = (Status.UNCHANGED, Status.LIMITED_UNCHANGED)
+
+
 async def run_parallel(
-    repos: list[Repo], worker, jobs: int = DEFAULT_JOBS
+    repos: list[Repo], worker, jobs: int = DEFAULT_JOBS, verbose: bool = False
 ) -> list[RepoResult]:
     """Runs worker(repo) for each repo concurrently (bounded by a semaphore
     -- these are I/O-bound `gh`/network calls, not CPU-bound work), printing
@@ -480,15 +484,23 @@ async def run_parallel(
     raises). Instead it's printed as a failure line and collected; once
     every repo has been attempted, any failures are raised together as a
     single GhError so the run still ends with a nonzero exit.
+
+    Unless verbose=True, a repo already at its target (UNCHANGED /
+    LIMITED_UNCHANGED) isn't printed live -- on a real account-wide run the
+    handful of lines that represent an actual change would otherwise be
+    lost in a wall of "unchanged: ..." lines. Suppressed lines are counted
+    and reported as a single dim summary line instead.
     """
     results: list[RepoResult] = []
     failed_names: list[str] = []
+    unchanged_count = 0
     sem = asyncio.Semaphore(jobs)
 
     with progress_bar() as progress:
         task = progress.add_task("Processing repos...", total=len(repos))
 
         async def call(repo: Repo) -> None:
+            nonlocal unchanged_count
             async with sem:
                 try:
                     result = await worker(repo)
@@ -496,7 +508,10 @@ async def run_parallel(
                     failed_names.append(repo.name)
                     print_status(Status.FAILED, f"{repo.name}: {exc}")
                 else:
-                    print_status(result.status, result.line)
+                    if not verbose and result.status in _QUIET_STATUSES:
+                        unchanged_count += 1
+                    else:
+                        print_status(result.status, result.line)
                     results.append(result)
                 finally:
                     progress.advance(task)
@@ -504,6 +519,12 @@ async def run_parallel(
         async with asyncio.TaskGroup() as tg:
             for repo in repos:
                 tg.create_task(call(repo))
+
+    if unchanged_count:
+        console.print(
+            f"  {unchanged_count} unchanged (rerun with --verbose to see them)",
+            style="dim",
+        )
 
     if failed_names:
         raise GhError(

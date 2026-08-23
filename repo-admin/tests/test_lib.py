@@ -315,6 +315,73 @@ async def test_run_parallel_reports_failed_repo_names_in_error(capsys):
     assert "bad-repo" in capsys.readouterr().out
 
 
+async def test_run_parallel_hides_unchanged_lines_by_default(capsys):
+    repos = [
+        Repo(name="repo-a", default_branch="main", is_private=False, is_fork=False)
+    ]
+
+    async def worker(repo):
+        return RepoResult(repo=repo, line=f"{repo.name} line", status=Status.UNCHANGED)
+
+    await run_parallel(repos, worker, jobs=1)
+    out = capsys.readouterr().out
+    assert "repo-a line" not in out
+    assert "1 unchanged" in out
+
+
+async def test_run_parallel_verbose_shows_unchanged_lines_without_summary(capsys):
+    repos = [
+        Repo(name="repo-a", default_branch="main", is_private=False, is_fork=False)
+    ]
+
+    async def worker(repo):
+        return RepoResult(repo=repo, line=f"{repo.name} line", status=Status.UNCHANGED)
+
+    await run_parallel(repos, worker, jobs=1, verbose=True)
+    out = capsys.readouterr().out
+    assert "repo-a line" in out
+    assert "unchanged" not in out.replace("repo-a line", "")
+
+
+@pytest.mark.parametrize("status", [Status.OK, Status.FAILED, Status.LIMITED])
+async def test_run_parallel_always_shows_non_unchanged_lines(capsys, status):
+    repos = [
+        Repo(name="repo-a", default_branch="main", is_private=False, is_fork=False)
+    ]
+
+    async def worker(repo):
+        if status is Status.FAILED:
+            raise RuntimeError("boom")
+        return RepoResult(repo=repo, line=f"{repo.name} line", status=status)
+
+    if status is Status.FAILED:
+        with pytest.raises(GhError):
+            await run_parallel(repos, worker, jobs=1)
+        out = capsys.readouterr().out
+        assert "repo-a" in out
+    else:
+        await run_parallel(repos, worker, jobs=1)
+        out = capsys.readouterr().out
+        assert "repo-a line" in out
+    assert "unchanged" not in out
+
+
+async def test_run_parallel_hides_limited_unchanged_lines_by_default(capsys):
+    repos = [
+        Repo(name="repo-a", default_branch="main", is_private=False, is_fork=False)
+    ]
+
+    async def worker(repo):
+        return RepoResult(
+            repo=repo, line=f"{repo.name} line", status=Status.LIMITED_UNCHANGED
+        )
+
+    await run_parallel(repos, worker, jobs=1)
+    out = capsys.readouterr().out
+    assert "repo-a line" not in out
+    assert "1 unchanged" in out
+
+
 def test_default_secrets_reads_repo_list(tmp_path, monkeypatch):
     secrets_file = tmp_path / "secrets.yaml"
     secrets_file.write_text("TAP_GITHUB_TOKEN:\n  repos: [hrd, jj-trim, netcheck]\n")

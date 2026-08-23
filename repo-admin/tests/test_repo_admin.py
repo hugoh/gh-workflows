@@ -19,11 +19,11 @@ class _PresentPath:
 
 
 # ---------------------------------------------------------------------------
-# list
+# repos list
 # ---------------------------------------------------------------------------
 
 
-async def test_cmd_list_prints_a_row_per_repo(monkeypatch, capsys):
+async def test_cmd_repos_list_prints_a_row_per_repo(monkeypatch, capsys):
     async def fake_list_repos(owner, *, only=None, skip=None):
         return [
             Repo(name="repo-a", default_branch="main", is_private=False, is_fork=False),
@@ -31,8 +31,8 @@ async def test_cmd_list_prints_a_row_per_repo(monkeypatch, capsys):
         ]
 
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
-    args = argparse.Namespace(only=None, skip=None)
-    assert await repo_admin.cmd_list(args) == 0
+    args = argparse.Namespace(repos=[], skip=None)
+    assert await repo_admin.cmd_repos_list(args) == 0
     out = capsys.readouterr().out
     assert "repo-a" in out
     assert "repo-b" in out
@@ -40,7 +40,7 @@ async def test_cmd_list_prints_a_row_per_repo(monkeypatch, capsys):
     assert "DEFAULT BRANCH" in out
 
 
-async def test_cmd_list_passes_through_only_and_skip_filters(monkeypatch):
+async def test_cmd_repos_list_passes_through_repos_and_skip_filters(monkeypatch):
     seen = {}
 
     async def fake_list_repos(owner, *, only=None, skip=None):
@@ -49,13 +49,13 @@ async def test_cmd_list_passes_through_only_and_skip_filters(monkeypatch):
         return []
 
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
-    args = argparse.Namespace(only="repo-a", skip="repo-b")
-    await repo_admin.cmd_list(args)
+    args = argparse.Namespace(repos=["repo-a"], skip="repo-b")
+    await repo_admin.cmd_repos_list(args)
     assert seen == {"only": {"repo-a"}, "skip": {"repo-b"}}
 
 
 # ---------------------------------------------------------------------------
-# merge-settings
+# merge sync
 # ---------------------------------------------------------------------------
 
 
@@ -224,7 +224,7 @@ async def test_merge_settings_worker_apply_limited_when_partially_fixed(monkeypa
 
 
 # ---------------------------------------------------------------------------
-# security-features
+# security sync
 # ---------------------------------------------------------------------------
 
 
@@ -442,7 +442,7 @@ async def test_security_worker_apply_limited_when_unavailable_and_was_pending(
 
 
 # ---------------------------------------------------------------------------
-# branch-protection
+# protection sync
 # ---------------------------------------------------------------------------
 
 
@@ -767,7 +767,7 @@ async def test_branch_protection_worker_apply_ok_when_updating_from_stale_state(
     assert result.tag == repo_admin.Tag.APPLIED
 
 
-async def test_cmd_branch_protection_merges_exclude_list_into_skip(monkeypatch):
+async def test_cmd_protection_sync_merges_exclude_list_into_skip(monkeypatch):
     seen = {}
 
     async def fake_list_repos(owner, *, only=None, skip=None):
@@ -778,12 +778,12 @@ async def test_cmd_branch_protection_merges_exclude_list_into_skip(monkeypatch):
     monkeypatch.setattr(
         repo_admin, "default_branch_protection_exclude", lambda: {"homebrew-tap"}
     )
-    args = argparse.Namespace(only=None, skip="other-repo", dry_run=True)
-    await repo_admin.cmd_branch_protection(args)
+    args = argparse.Namespace(repos=[], skip="other-repo", dry_run=True, verbose=False)
+    await repo_admin.cmd_protection_sync(args)
     assert seen["skip"] == {"homebrew-tap", "other-repo"}
 
 
-async def test_cmd_branch_protection_excludes_even_without_explicit_skip(monkeypatch):
+async def test_cmd_protection_sync_excludes_even_without_explicit_skip(monkeypatch):
     seen = {}
 
     async def fake_list_repos(owner, *, only=None, skip=None):
@@ -794,17 +794,35 @@ async def test_cmd_branch_protection_excludes_even_without_explicit_skip(monkeyp
     monkeypatch.setattr(
         repo_admin, "default_branch_protection_exclude", lambda: {"homebrew-tap"}
     )
-    args = argparse.Namespace(only=None, skip=None, dry_run=True)
-    await repo_admin.cmd_branch_protection(args)
+    args = argparse.Namespace(repos=[], skip=None, dry_run=True, verbose=False)
+    await repo_admin.cmd_protection_sync(args)
     assert seen["skip"] == {"homebrew-tap"}
 
 
+async def test_cmd_protection_sync_passes_verbose_to_run_parallel(monkeypatch):
+    seen = {}
+
+    async def fake_list_repos(owner, *, only=None, skip=None):
+        return [REPO]
+
+    async def fake_run_parallel(repos, worker, *, verbose=False, jobs=None):
+        seen["verbose"] = verbose
+        return []
+
+    monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
+    monkeypatch.setattr(repo_admin, "run_parallel", fake_run_parallel)
+    monkeypatch.setattr(repo_admin, "default_branch_protection_exclude", set)
+    args = argparse.Namespace(repos=[], skip=None, dry_run=True, verbose=True)
+    await repo_admin.cmd_protection_sync(args)
+    assert seen["verbose"] is True
+
+
 # ---------------------------------------------------------------------------
-# all
+# sync (meta)
 # ---------------------------------------------------------------------------
 
 
-async def test_cmd_all_runs_merge_settings_branch_protection_security_in_order(
+async def test_cmd_sync_runs_merge_protection_security_in_order(
     monkeypatch,
 ):
     calls = []
@@ -821,15 +839,15 @@ async def test_cmd_all_runs_merge_settings_branch_protection_security_in_order(
         calls.append("security-features")
         return 0
 
-    monkeypatch.setattr(repo_admin, "cmd_merge_settings", fake_merge_settings)
-    monkeypatch.setattr(repo_admin, "cmd_branch_protection", fake_branch_protection)
-    monkeypatch.setattr(repo_admin, "cmd_security_features", fake_security_features)
-    args = argparse.Namespace(dry_run=True, only=None, skip=None)
-    assert await repo_admin.cmd_all(args) == 0
+    monkeypatch.setattr(repo_admin, "cmd_merge_sync", fake_merge_settings)
+    monkeypatch.setattr(repo_admin, "cmd_protection_sync", fake_branch_protection)
+    monkeypatch.setattr(repo_admin, "cmd_security_sync", fake_security_features)
+    args = argparse.Namespace(dry_run=True, repos=[], skip=None, verbose=False)
+    assert await repo_admin.cmd_sync(args) == 0
     assert calls == ["merge-settings", "branch-protection", "security-features"]
 
 
-async def test_cmd_all_continues_after_a_command_fails_and_returns_nonzero(
+async def test_cmd_sync_continues_after_a_command_fails_and_returns_nonzero(
     monkeypatch,
 ):
     calls = []
@@ -846,36 +864,36 @@ async def test_cmd_all_continues_after_a_command_fails_and_returns_nonzero(
         calls.append("security-features")
         return 0
 
-    monkeypatch.setattr(repo_admin, "cmd_merge_settings", failing)
-    monkeypatch.setattr(repo_admin, "cmd_branch_protection", fake_branch_protection)
-    monkeypatch.setattr(repo_admin, "cmd_security_features", fake_security_features)
-    args = argparse.Namespace(dry_run=True, only=None, skip=None)
-    assert await repo_admin.cmd_all(args) == 1
+    monkeypatch.setattr(repo_admin, "cmd_merge_sync", failing)
+    monkeypatch.setattr(repo_admin, "cmd_protection_sync", fake_branch_protection)
+    monkeypatch.setattr(repo_admin, "cmd_security_sync", fake_security_features)
+    args = argparse.Namespace(dry_run=True, repos=[], skip=None, verbose=False)
+    assert await repo_admin.cmd_sync(args) == 1
     assert calls == ["merge-settings", "branch-protection", "security-features"]
 
 
-async def test_cmd_all_returns_nonzero_when_a_command_returns_nonzero(monkeypatch):
+async def test_cmd_sync_returns_nonzero_when_a_command_returns_nonzero(monkeypatch):
     async def fake_one(args):
         return 1
 
     async def fake_zero(args):
         return 0
 
-    monkeypatch.setattr(repo_admin, "cmd_merge_settings", fake_one)
-    monkeypatch.setattr(repo_admin, "cmd_branch_protection", fake_zero)
-    monkeypatch.setattr(repo_admin, "cmd_security_features", fake_zero)
-    args = argparse.Namespace(dry_run=True, only=None, skip=None)
-    assert await repo_admin.cmd_all(args) == 1
+    monkeypatch.setattr(repo_admin, "cmd_merge_sync", fake_one)
+    monkeypatch.setattr(repo_admin, "cmd_protection_sync", fake_zero)
+    monkeypatch.setattr(repo_admin, "cmd_security_sync", fake_zero)
+    args = argparse.Namespace(dry_run=True, repos=[], skip=None, verbose=False)
+    assert await repo_admin.cmd_sync(args) == 1
 
 
-def test_all_subcommand_is_registered_in_parser():
-    args = repo_admin.build_parser().parse_args(["all", "--dry-run"])
-    assert args.func == repo_admin.cmd_all
+def test_sync_subcommand_is_registered_in_parser():
+    args = repo_admin.build_parser().parse_args(["sync", "--dry-run"])
+    assert args.func == repo_admin.cmd_sync
     assert args.dry_run is True
 
 
 # ---------------------------------------------------------------------------
-# pages-domain
+# pages sync
 # ---------------------------------------------------------------------------
 
 DOMAIN = "awesome-jj.larve.net"
@@ -1096,7 +1114,7 @@ async def test_pages_domain_worker_apply_unchanged_when_already_at_target(monkey
     assert result.status == Status.UNCHANGED
 
 
-async def test_cmd_pages_domain_defaults_to_mapped_repos(monkeypatch):
+async def test_cmd_pages_sync_defaults_to_mapped_repos(monkeypatch):
     monkeypatch.setattr(
         repo_admin.lib, "default_pages_domains", lambda: {"awesome-jj": DOMAIN}
     )
@@ -1108,28 +1126,30 @@ async def test_cmd_pages_domain_defaults_to_mapped_repos(monkeypatch):
         return []
 
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
-    args = argparse.Namespace(dry_run=True, only=None, skip=None)
-    assert await repo_admin.cmd_pages_domain(args) == 0
+    args = argparse.Namespace(dry_run=True, repos=[], skip=None, verbose=False)
+    assert await repo_admin.cmd_pages_sync(args) == 0
     assert seen == {"only": {"awesome-jj"}, "skip": None}
 
 
-async def test_cmd_pages_domain_errors_on_unmapped_only_repo(monkeypatch, capsys):
+async def test_cmd_pages_sync_errors_on_unmapped_repo(monkeypatch, capsys):
     monkeypatch.setattr(
         repo_admin.lib, "default_pages_domains", lambda: {"awesome-jj": DOMAIN}
     )
-    args = argparse.Namespace(dry_run=True, only="not-mapped", skip=None)
-    assert await repo_admin.cmd_pages_domain(args) == 1
+    args = argparse.Namespace(
+        dry_run=True, repos=["not-mapped"], skip=None, verbose=False
+    )
+    assert await repo_admin.cmd_pages_sync(args) == 1
     assert "not-mapped" in capsys.readouterr().err
 
 
-def test_pages_domain_subcommand_is_registered_in_parser():
-    args = repo_admin.build_parser().parse_args(["pages-domain", "--dry-run"])
-    assert args.func == repo_admin.cmd_pages_domain
+def test_pages_sync_subcommand_is_registered_in_parser():
+    args = repo_admin.build_parser().parse_args(["pages", "sync", "--dry-run"])
+    assert args.func == repo_admin.cmd_pages_sync
     assert args.dry_run is True
 
 
 # ---------------------------------------------------------------------------
-# pages-status
+# pages status
 # ---------------------------------------------------------------------------
 
 
@@ -1179,7 +1199,7 @@ async def test_cmd_pages_status_lists_enabled_repos_and_flags_unmapped(
         repo_admin.lib, "default_pages_domains", lambda: {"awesome-jj": DOMAIN}
     )
 
-    args = argparse.Namespace(only=None, skip=None)
+    args = argparse.Namespace(repos=[], skip=None)
     assert await repo_admin.cmd_pages_status(args) == 0
     out = capsys.readouterr().out
     assert "awesome-jj" in out
@@ -1187,17 +1207,17 @@ async def test_cmd_pages_status_lists_enabled_repos_and_flags_unmapped(
     assert "no-pages" not in out
     assert f"https://{DOMAIN}" in out
     assert "https://hugoh.github.io/other-repo/" in out
-    assert "not in pages-domains.yaml" in out
-    assert "other-repo" in out.split("not in pages-domains.yaml")[1]
+    assert "not in config/pages-domains.yaml" in out
+    assert "other-repo" in out.split("not in config/pages-domains.yaml")[1]
 
 
 def test_pages_status_subcommand_is_registered_in_parser():
-    args = repo_admin.build_parser().parse_args(["pages-status"])
+    args = repo_admin.build_parser().parse_args(["pages", "status"])
     assert args.func == repo_admin.cmd_pages_status
 
 
 # ---------------------------------------------------------------------------
-# pages-domain-config
+# pages config
 # ---------------------------------------------------------------------------
 
 
@@ -1213,21 +1233,23 @@ def test_pages_domain_suggest_replaces_dots_in_repo_name_with_dashes():
     )
 
 
-async def test_cmd_pages_domain_config_uses_explicit_only_without_api_calls(
+async def test_cmd_pages_config_uses_explicit_repos_without_api_calls(
     monkeypatch, capsys
 ):
     async def fail_list_repos(*a, **k):
         raise AssertionError("should not query GitHub when --only is given")
 
     monkeypatch.setattr(repo_admin, "list_repos", fail_list_repos)
-    args = argparse.Namespace(domain="larve.net", only="awesome-jj,hrd", skip=None)
-    assert await repo_admin.cmd_pages_domain_config(args) == 0
+    args = argparse.Namespace(
+        domain="larve.net", repos=["awesome-jj", "hrd"], skip=None
+    )
+    assert await repo_admin.cmd_pages_config(args) == 0
     out = capsys.readouterr().out
     assert "awesome-jj: awesome-jj.larve.net" in out
     assert "hrd: hrd.larve.net" in out
 
 
-async def test_cmd_pages_domain_config_auto_discovers_unmapped_enabled_repos(
+async def test_cmd_pages_config_auto_discovers_unmapped_enabled_repos(
     monkeypatch, capsys
 ):
     mapped_repo = Repo(
@@ -1255,23 +1277,23 @@ async def test_cmd_pages_domain_config_auto_discovers_unmapped_enabled_repos(
         repo_admin.lib, "default_pages_domains", lambda: {"awesome-jj": DOMAIN}
     )
 
-    args = argparse.Namespace(domain="larve.net", only=None, skip=None)
-    assert await repo_admin.cmd_pages_domain_config(args) == 0
+    args = argparse.Namespace(domain="larve.net", repos=[], skip=None)
+    assert await repo_admin.cmd_pages_config(args) == 0
     out = capsys.readouterr().out
     assert "AppBadgeWatcher-spoon.larve.net" in out
     assert "awesome-jj" not in out
 
 
-def test_pages_domain_config_subcommand_is_registered_in_parser():
+def test_pages_config_subcommand_is_registered_in_parser():
     args = repo_admin.build_parser().parse_args(
-        ["pages-domain-config", "--domain", "larve.net"]
+        ["pages", "config", "--domain", "larve.net"]
     )
-    assert args.func == repo_admin.cmd_pages_domain_config
+    assert args.func == repo_admin.cmd_pages_config
     assert args.domain == "larve.net"
 
 
 # ---------------------------------------------------------------------------
-# secrets-sync
+# secrets sync
 # ---------------------------------------------------------------------------
 
 
@@ -1331,7 +1353,9 @@ async def test_cmd_secrets_sync_defaults_to_all_configured_secrets(monkeypatch):
         return []
 
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
-    args = argparse.Namespace(dry_run=False, only=None, skip=None, secret=None)
+    args = argparse.Namespace(
+        dry_run=False, repos=[], skip=None, secret=None, verbose=False
+    )
     assert await repo_admin.cmd_secrets_sync(args) == 0
     assert sorted(seen_only, key=str) == [{"repo-a"}, {"repo-b"}]
 
@@ -1346,7 +1370,7 @@ async def test_cmd_secrets_sync_errors_on_unknown_secret_name(monkeypatch, capsy
 
     monkeypatch.setattr(repo_admin.lib, "decrypt_secrets", fail_decrypt_secrets)
     args = argparse.Namespace(
-        dry_run=True, only=None, skip=None, secret="NOT_CONFIGURED"
+        dry_run=True, repos=[], skip=None, secret="NOT_CONFIGURED", verbose=False
     )
     assert await repo_admin.cmd_secrets_sync(args) == 1
     assert "NOT_CONFIGURED" in capsys.readouterr().err
@@ -1371,7 +1395,9 @@ async def test_cmd_secrets_sync_only_filters_within_each_secrets_repo_list(monke
         return []
 
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
-    args = argparse.Namespace(dry_run=False, only="repo-shared", skip=None, secret=None)
+    args = argparse.Namespace(
+        dry_run=False, repos=["repo-shared"], skip=None, secret=None, verbose=False
+    )
     assert await repo_admin.cmd_secrets_sync(args) == 0
     assert sorted(seen_only, key=str) == [{"repo-shared"}, {"repo-shared"}]
 
@@ -1392,7 +1418,9 @@ async def test_cmd_secrets_sync_skips_secret_missing_from_encrypted_file(
         return []
 
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
-    args = argparse.Namespace(dry_run=False, only=None, skip=None, secret=None)
+    args = argparse.Namespace(
+        dry_run=False, repos=[], skip=None, secret=None, verbose=False
+    )
     assert await repo_admin.cmd_secrets_sync(args) == 1
     err = capsys.readouterr().err
     assert "NAME_A" in err
@@ -1413,20 +1441,22 @@ async def test_cmd_secrets_sync_dry_run_never_calls_decrypt_secrets(monkeypatch)
         return []
 
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
-    args = argparse.Namespace(dry_run=True, only=None, skip=None, secret=None)
+    args = argparse.Namespace(
+        dry_run=True, repos=[], skip=None, secret=None, verbose=False
+    )
     assert await repo_admin.cmd_secrets_sync(args) == 0
 
 
 def test_secrets_sync_subcommand_is_registered_in_parser():
     args = repo_admin.build_parser().parse_args(
-        ["secrets-sync", "--dry-run", "--secret", "NAME"]
+        ["secrets", "sync", "--dry-run", "--secret", "NAME"]
     )
     assert args.func == repo_admin.cmd_secrets_sync
     assert args.secret == "NAME"
 
 
 # ---------------------------------------------------------------------------
-# secrets-edit
+# secrets edit
 # ---------------------------------------------------------------------------
 
 
@@ -1508,5 +1538,5 @@ async def test_cmd_secrets_edit_warns_about_missing_and_stale_keys(monkeypatch, 
 
 
 def test_secrets_edit_subcommand_is_registered_in_parser():
-    args = repo_admin.build_parser().parse_args(["secrets-edit"])
+    args = repo_admin.build_parser().parse_args(["secrets", "edit"])
     assert args.func == repo_admin.cmd_secrets_edit
