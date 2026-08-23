@@ -1,5 +1,6 @@
 import asyncio
 import io
+import subprocess
 
 import httpx
 import lib
@@ -22,6 +23,7 @@ from lib import (
     run_parallel,
     unmatched_include_forks,
 )
+from nacl import encoding, public
 from rich.console import Console
 
 REPOS_JSON = [
@@ -311,6 +313,268 @@ async def test_run_parallel_reports_failed_repo_names_in_error(capsys):
     with pytest.raises(GhError, match="bad-repo"):
         await run_parallel(repos, worker, jobs=1)
     assert "bad-repo" in capsys.readouterr().out
+
+
+async def test_run_parallel_hides_unchanged_lines_by_default(capsys):
+    repos = [
+        Repo(name="repo-a", default_branch="main", is_private=False, is_fork=False)
+    ]
+
+    async def worker(repo):
+        return RepoResult(repo=repo, line=f"{repo.name} line", status=Status.UNCHANGED)
+
+    await run_parallel(repos, worker, jobs=1)
+    out = capsys.readouterr().out
+    assert "repo-a line" not in out
+    assert "1 unchanged" in out
+
+
+async def test_run_parallel_verbose_shows_unchanged_lines_without_summary(capsys):
+    repos = [
+        Repo(name="repo-a", default_branch="main", is_private=False, is_fork=False)
+    ]
+
+    async def worker(repo):
+        return RepoResult(repo=repo, line=f"{repo.name} line", status=Status.UNCHANGED)
+
+    await run_parallel(repos, worker, jobs=1, verbose=True)
+    out = capsys.readouterr().out
+    assert "repo-a line" in out
+    assert "unchanged" not in out.replace("repo-a line", "")
+
+
+@pytest.mark.parametrize("status", [Status.OK, Status.FAILED, Status.LIMITED])
+async def test_run_parallel_always_shows_non_unchanged_lines(capsys, status):
+    repos = [
+        Repo(name="repo-a", default_branch="main", is_private=False, is_fork=False)
+    ]
+
+    async def worker(repo):
+        if status is Status.FAILED:
+            raise RuntimeError("boom")
+        return RepoResult(repo=repo, line=f"{repo.name} line", status=status)
+
+    if status is Status.FAILED:
+        with pytest.raises(GhError):
+            await run_parallel(repos, worker, jobs=1)
+        out = capsys.readouterr().out
+        assert "repo-a" in out
+    else:
+        await run_parallel(repos, worker, jobs=1)
+        out = capsys.readouterr().out
+        assert "repo-a line" in out
+    assert "unchanged" not in out
+
+
+async def test_run_parallel_hides_limited_unchanged_lines_by_default(capsys):
+    repos = [
+        Repo(name="repo-a", default_branch="main", is_private=False, is_fork=False)
+    ]
+
+    async def worker(repo):
+        return RepoResult(
+            repo=repo, line=f"{repo.name} line", status=Status.LIMITED_UNCHANGED
+        )
+
+    await run_parallel(repos, worker, jobs=1)
+    out = capsys.readouterr().out
+    assert "repo-a line" not in out
+    assert "1 unchanged" in out
+
+
+def test_default_secrets_reads_repo_list(tmp_path, monkeypatch):
+    secrets_file = tmp_path / "secrets.yaml"
+    secrets_file.write_text("TAP_GITHUB_TOKEN:\n  repos: [hrd, jj-trim, netcheck]\n")
+    monkeypatch.setattr(lib, "SECRETS_FILE", secrets_file)
+    assert lib.default_secrets() == {"TAP_GITHUB_TOKEN": ["hrd", "jj-trim", "netcheck"]}
+
+
+def test_default_secrets_empty_file_returns_empty_dict(tmp_path, monkeypatch):
+    secrets_file = tmp_path / "secrets.yaml"
+    secrets_file.write_text("")
+    monkeypatch.setattr(lib, "SECRETS_FILE", secrets_file)
+    assert lib.default_secrets() == {}
+
+
+@pytest.fixture
+def enc_file(tmp_path, monkeypatch):
+    path = tmp_path / "secrets.enc.yaml"
+    monkeypatch.setattr(lib, "SECRETS_ENC_FILE", path)
+    return path
+
+
+def test_decrypt_secrets_calls_sops_and_parses_yaml(enc_file, monkeypatch):
+    enc_file.write_text("placeholder")
+
+    def fake_run(cmd, **kwargs):
+        assert cmd == ["sops", "-d", str(enc_file)]
+        return subprocess.CompletedProcess(cmd, 0, stdout="NAME: value\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert lib.decrypt_secrets() == {"NAME": "value"}
+
+
+def test_decrypt_secrets_strips_sops_metadata_key(enc_file, monkeypatch):
+    enc_file.write_text("placeholder")
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout="NAME: value\nsops:\n    age: []\n", stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert lib.decrypt_secrets() == {"NAME": "value"}
+
+
+def test_decrypt_secrets_raises_gh_error_on_nonzero_exit(enc_file, monkeypatch):
+    enc_file.write_text("placeholder")
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="no key found")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(GhError, match="no key found"):
+        lib.decrypt_secrets()
+
+
+def test_decrypt_secrets_raises_gh_error_when_sops_not_on_path(enc_file, monkeypatch):
+    enc_file.write_text("placeholder")
+
+    def fake_run(cmd, **kwargs):
+        raise FileNotFoundError("sops")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(GhError, match="sops not found"):
+        lib.decrypt_secrets()
+
+
+def test_decrypt_secrets_raises_gh_error_when_file_missing(enc_file, monkeypatch):
+    def fail_run(cmd, **kwargs):
+        raise AssertionError("should not shell out to sops when the file is missing")
+
+    monkeypatch.setattr(subprocess, "run", fail_run)
+    with pytest.raises(GhError, match="not found"):
+        lib.decrypt_secrets()
+
+
+def test_encrypt_secret_value_round_trips_through_sealed_box():
+    private_key = public.PrivateKey.generate()
+    public_key_b64 = private_key.public_key.encode(encoding.Base64Encoder).decode(
+        "utf-8"
+    )
+
+    ciphertext_b64 = lib.encrypt_secret_value(public_key_b64, "super-secret-value")
+
+    import base64
+
+    decrypted = public.SealedBox(private_key).decrypt(base64.b64decode(ciphertext_b64))
+    assert decrypted == b"super-secret-value"
+
+
+def test_init_secrets_file_encrypts_template_via_sops_stdin(
+    enc_file, tmp_path, monkeypatch
+):
+    config_file = tmp_path / ".sops.yaml"
+    monkeypatch.setattr(lib, "SOPS_CONFIG_FILE", config_file)
+
+    def fake_run(cmd, **kwargs):
+        assert cmd == [
+            "sops",
+            "--encrypt",
+            "--config",
+            str(config_file),
+            "--filename-override",
+            str(enc_file),
+            "--input-type",
+            "yaml",
+            "--output-type",
+            "yaml",
+            "/dev/stdin",
+        ]
+        assert kwargs["input"] == "NAME: ''\n"
+        return subprocess.CompletedProcess(cmd, 0, stdout="NAME: ENC[...]\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    lib.init_secrets_file("NAME: ''\n")
+    assert enc_file.read_text() == "NAME: ENC[...]\n"
+
+
+def test_init_secrets_file_raises_gh_error_on_nonzero_exit(enc_file, monkeypatch):
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="no key found")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(GhError, match="no key found"):
+        lib.init_secrets_file("NAME: ''\n")
+    assert not enc_file.exists()
+
+
+def test_init_secrets_file_raises_gh_error_when_sops_not_on_path(enc_file, monkeypatch):
+    def fake_run(cmd, **kwargs):
+        raise FileNotFoundError("sops")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(GhError, match="sops not found"):
+        lib.init_secrets_file("NAME: ''\n")
+
+
+def test_edit_secrets_file_runs_sops_on_the_file_and_returns_exit_code(
+    enc_file, monkeypatch
+):
+    def fake_run(cmd, **kwargs):
+        assert cmd == ["sops", str(enc_file)]
+        assert "capture_output" not in kwargs  # inherits stdio for the editor session
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert lib.edit_secrets_file() == 0
+
+
+def test_edit_secrets_file_returns_nonzero_exit_code(enc_file, monkeypatch):
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert lib.edit_secrets_file() == 1
+
+
+def test_edit_secrets_file_raises_gh_error_when_sops_not_on_path(enc_file, monkeypatch):
+    def fake_run(cmd, **kwargs):
+        raise FileNotFoundError("sops")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(GhError, match="sops not found"):
+        lib.edit_secrets_file()
+
+
+async def test_set_repo_secret_encrypts_and_puts_with_key_id(monkeypatch):
+    private_key = public.PrivateKey.generate()
+    public_key_b64 = private_key.public_key.encode(encoding.Base64Encoder).decode(
+        "utf-8"
+    )
+    calls = []
+
+    async def fake_api_json(method, path, **kwargs):
+        if method == "GET":
+            return {"key": public_key_b64, "key_id": "key-id-123"}
+        calls.append((method, path, kwargs.get("json")))
+        return {}
+
+    monkeypatch.setattr(lib, "api_json", fake_api_json)
+    await lib.set_repo_secret("hugoh", "repo", "NAME", "the-value")
+
+    assert len(calls) == 1
+    method, path, body = calls[0]
+    assert method == "PUT"
+    assert path == "/repos/hugoh/repo/actions/secrets/NAME"
+    assert body["key_id"] == "key-id-123"
+
+    import base64
+
+    decrypted = public.SealedBox(private_key).decrypt(
+        base64.b64decode(body["encrypted_value"])
+    )
+    assert decrypted == b"the-value"
 
 
 # ---------------------------------------------------------------------------

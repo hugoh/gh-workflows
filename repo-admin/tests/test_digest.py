@@ -322,45 +322,30 @@ async def test_fetch_releases_combines_multiple_repos(httpx2_mock: respx.Router)
 # ---------------------------------------------------------------------------
 
 
-async def test_fetch_prs_ci_status_pending_when_a_check_is_not_completed(
-    httpx2_mock: respx.Router,
+@pytest.mark.parametrize(
+    ("check_runs", "expected_status"),
+    [
+        (
+            [_check_run(status="in_progress", conclusion=None)],
+            "pending",
+        ),
+        (
+            [_check_run(), _check_run(conclusion="failure")],
+            "failing",
+        ),
+        ([], "no checks"),
+    ],
+    ids=["pending", "failing", "no_checks"],
+)
+async def test_fetch_prs_ci_status(
+    httpx2_mock: respx.Router, check_runs, expected_status
 ):
     httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
         return_value=httpx.Response(200, json=[_pr(number=1)])
     )
-    _mock_open_pr_extras(
-        httpx2_mock,
-        number=1,
-        check_runs=[_check_run(status="in_progress", conclusion=None)],
-    )
+    _mock_open_pr_extras(httpx2_mock, number=1, check_runs=check_runs)
     prs = await fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
-    assert prs[0]["ci_status"] == "pending"
-
-
-async def test_fetch_prs_ci_status_failing_when_a_check_failed(
-    httpx2_mock: respx.Router,
-):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
-        return_value=httpx.Response(200, json=[_pr(number=1)])
-    )
-    _mock_open_pr_extras(
-        httpx2_mock,
-        number=1,
-        check_runs=[_check_run(), _check_run(conclusion="failure")],
-    )
-    prs = await fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
-    assert prs[0]["ci_status"] == "failing"
-
-
-async def test_fetch_prs_ci_status_no_checks_when_no_check_runs(
-    httpx2_mock: respx.Router,
-):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
-        return_value=httpx.Response(200, json=[_pr(number=1)])
-    )
-    _mock_open_pr_extras(httpx2_mock, number=1, check_runs=[])
-    prs = await fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
-    assert prs[0]["ci_status"] == "no checks"
+    assert prs[0]["ci_status"] == expected_status
 
 
 async def test_fetch_prs_mergeable_conflict_when_dirty(httpx2_mock: respx.Router):

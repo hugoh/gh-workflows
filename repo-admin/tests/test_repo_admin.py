@@ -4,31 +4,22 @@ import repo_admin
 from lib import GhError, Repo, Status
 
 REPO = Repo(name="repo", default_branch="main", is_private=False, is_fork=False)
+PRIVATE_REPO = Repo(name="repo", default_branch="main", is_private=True, is_fork=False)
 
 
-# ---------------------------------------------------------------------------
-# list
-# ---------------------------------------------------------------------------
+class _MissingPath:
+    name = "secrets.enc.yaml"
+
+    def exists(self):
+        return False
 
 
-async def test_cmd_list_prints_a_row_per_repo(monkeypatch, capsys):
-    async def fake_list_repos(owner, *, only=None, skip=None):
-        return [
-            Repo(name="repo-a", default_branch="main", is_private=False, is_fork=False),
-            Repo(name="repo-b", default_branch="master", is_private=True, is_fork=True),
-        ]
-
-    monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
-    args = argparse.Namespace(only=None, skip=None)
-    assert await repo_admin.cmd_list(args) == 0
-    out = capsys.readouterr().out
-    assert "repo-a" in out
-    assert "repo-b" in out
-    assert "NAME" in out
-    assert "DEFAULT BRANCH" in out
+class _PresentPath:
+    def exists(self):
+        return True
 
 
-async def test_cmd_list_passes_through_only_and_skip_filters(monkeypatch):
+def _capturing_list_repos():
     seen = {}
 
     async def fake_list_repos(owner, *, only=None, skip=None):
@@ -36,14 +27,41 @@ async def test_cmd_list_passes_through_only_and_skip_filters(monkeypatch):
         seen["skip"] = skip
         return []
 
+    return seen, fake_list_repos
+
+
+# ---------------------------------------------------------------------------
+# repos list
+# ---------------------------------------------------------------------------
+
+
+async def test_cmd_repos_list_prints_a_row_per_repo(monkeypatch, capsys):
+    async def fake_list_repos(owner, *, only=None, skip=None):
+        return [
+            Repo(name="repo-a", default_branch="main", is_private=False, is_fork=False),
+            Repo(name="repo-b", default_branch="master", is_private=True, is_fork=True),
+        ]
+
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
-    args = argparse.Namespace(only="repo-a", skip="repo-b")
-    await repo_admin.cmd_list(args)
+    args = argparse.Namespace(repos=[], skip=None)
+    assert await repo_admin.cmd_repos_list(args) == 0
+    out = capsys.readouterr().out
+    assert "repo-a" in out
+    assert "repo-b" in out
+    assert "NAME" in out
+    assert "DEFAULT BRANCH" in out
+
+
+async def test_cmd_repos_list_passes_through_repos_and_skip_filters(monkeypatch):
+    seen, fake_list_repos = _capturing_list_repos()
+    monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
+    args = argparse.Namespace(repos=["repo-a"], skip="repo-b")
+    await repo_admin.cmd_repos_list(args)
     assert seen == {"only": {"repo-a"}, "skip": {"repo-b"}}
 
 
 # ---------------------------------------------------------------------------
-# merge-settings
+# merge sync
 # ---------------------------------------------------------------------------
 
 
@@ -94,16 +112,23 @@ def test_merge_settings_apply_line_changed():
     assert line == f"{'repo':<30} {before} -> {after}"
 
 
-async def test_merge_settings_worker_dry_run(monkeypatch):
+def _merge_settings_dry_run_worker(monkeypatch, settings):
     async def fake_merge_settings(owner, name):
-        return {
+        return settings
+
+    monkeypatch.setattr(repo_admin, "_merge_settings", fake_merge_settings)
+    return repo_admin.make_merge_settings_worker(owner="hugoh", dry_run=True)
+
+
+async def test_merge_settings_worker_dry_run(monkeypatch):
+    worker = _merge_settings_dry_run_worker(
+        monkeypatch,
+        {
             "allow_auto_merge": False,
             "delete_branch_on_merge": True,
             "allow_update_branch": True,
-        }
-
-    monkeypatch.setattr(repo_admin, "_merge_settings", fake_merge_settings)
-    worker = repo_admin.make_merge_settings_worker(owner="hugoh", dry_run=True)
+        },
+    )
     result = await worker(REPO)
     assert "would enable: allow_auto_merge" in result.line
 
@@ -129,29 +154,87 @@ def test_merge_settings_at_target_false_when_any_disabled():
 
 
 async def test_merge_settings_worker_dry_run_unchanged_when_at_target(monkeypatch):
-    async def fake_merge_settings(owner, name):
-        return {
+    worker = _merge_settings_dry_run_worker(
+        monkeypatch,
+        {
             "allow_auto_merge": True,
             "delete_branch_on_merge": True,
             "allow_update_branch": True,
-        }
-
-    monkeypatch.setattr(repo_admin, "_merge_settings", fake_merge_settings)
-    worker = repo_admin.make_merge_settings_worker(owner="hugoh", dry_run=True)
+        },
+    )
     assert (await worker(REPO)).status == Status.UNCHANGED
 
 
 async def test_merge_settings_worker_dry_run_ok_when_would_reach_target(monkeypatch):
-    async def fake_merge_settings(owner, name):
-        return {
+    worker = _merge_settings_dry_run_worker(
+        monkeypatch,
+        {
             "allow_auto_merge": False,
             "delete_branch_on_merge": True,
             "allow_update_branch": True,
-        }
-
-    monkeypatch.setattr(repo_admin, "_merge_settings", fake_merge_settings)
-    worker = repo_admin.make_merge_settings_worker(owner="hugoh", dry_run=True)
+        },
+    )
     assert (await worker(REPO)).status == Status.OK
+
+
+def test_merge_settings_dry_run_line_marks_gated_field_unavailable():
+    current = {
+        "allow_auto_merge": False,
+        "delete_branch_on_merge": True,
+        "allow_update_branch": True,
+    }
+    line = repo_admin.merge_settings_dry_run_line(
+        "repo", current, Status.LIMITED_UNCHANGED, is_private=True
+    )
+    assert "would enable" not in line
+    assert "(unavailable: allow_auto_merge)" in line
+
+
+def test_merge_settings_dry_run_line_would_enable_and_unavailable_together():
+    current = {
+        "allow_auto_merge": False,
+        "delete_branch_on_merge": False,
+        "allow_update_branch": True,
+    }
+    line = repo_admin.merge_settings_dry_run_line(
+        "repo", current, Status.LIMITED, is_private=True
+    )
+    assert "would enable: delete_branch_on_merge" in line
+    assert "(unavailable: allow_auto_merge)" in line
+
+
+async def test_merge_settings_worker_dry_run_limited_unchanged_on_private_repo_gate(
+    monkeypatch,
+):
+    worker = _merge_settings_dry_run_worker(
+        monkeypatch,
+        {
+            "allow_auto_merge": False,
+            "delete_branch_on_merge": True,
+            "allow_update_branch": True,
+        },
+    )
+    result = await worker(PRIVATE_REPO)
+    assert result.status == Status.LIMITED_UNCHANGED
+    assert "would enable" not in result.line
+    assert "unavailable: allow_auto_merge" in result.line
+
+
+async def test_merge_settings_worker_dry_run_limited_when_private_repo_has_fixable_field(
+    monkeypatch,
+):
+    worker = _merge_settings_dry_run_worker(
+        monkeypatch,
+        {
+            "allow_auto_merge": False,
+            "delete_branch_on_merge": False,
+            "allow_update_branch": True,
+        },
+    )
+    result = await worker(PRIVATE_REPO)
+    assert result.status == Status.LIMITED
+    assert "would enable: delete_branch_on_merge" in result.line
+    assert "unavailable: allow_auto_merge" in result.line
 
 
 def _merge_settings_apply_worker(monkeypatch, before, after):
@@ -212,7 +295,7 @@ async def test_merge_settings_worker_apply_limited_when_partially_fixed(monkeypa
 
 
 # ---------------------------------------------------------------------------
-# security-features
+# security sync
 # ---------------------------------------------------------------------------
 
 
@@ -430,7 +513,7 @@ async def test_security_worker_apply_limited_when_unavailable_and_was_pending(
 
 
 # ---------------------------------------------------------------------------
-# branch-protection
+# protection sync
 # ---------------------------------------------------------------------------
 
 
@@ -493,25 +576,25 @@ async def test_check_run_contexts_keeps_legitimately_skipped_check(monkeypatch):
     assert contexts == ["hk / hk", "pages"]
 
 
-def test_branch_protection_up_to_date_matches_baseline():
-    current = {
-        "required_status_checks": {"contexts": ["build", "test"], "strict": True},
+def _protection_state(*, contexts=("build", "test"), **overrides):
+    state = {
+        "required_status_checks": {"contexts": list(contexts), "strict": True},
         "enforce_admins": {"enabled": True},
         "allow_force_pushes": {"enabled": False},
         "allow_deletions": {"enabled": False},
         "required_pull_request_reviews": {"required_approving_review_count": 0},
     }
+    state.update(overrides)
+    return state
+
+
+def test_branch_protection_up_to_date_matches_baseline():
+    current = _protection_state(contexts=["build", "test"])
     assert repo_admin.branch_protection_up_to_date(current, ["test", "build"]) is True
 
 
 def test_branch_protection_up_to_date_false_when_contexts_differ():
-    current = {
-        "required_status_checks": {"contexts": ["build"], "strict": True},
-        "enforce_admins": {"enabled": True},
-        "allow_force_pushes": {"enabled": False},
-        "allow_deletions": {"enabled": False},
-        "required_pull_request_reviews": {"required_approving_review_count": 0},
-    }
+    current = _protection_state(contexts=["build"])
     assert repo_admin.branch_protection_up_to_date(current, ["test", "build"]) is False
 
 
@@ -540,26 +623,52 @@ def test_branch_protection_payload_no_contexts_omits_required_status_checks():
 
 
 def test_branch_protection_up_to_date_true_with_no_contexts_and_none_required():
-    current = {
-        "required_status_checks": None,
-        "enforce_admins": {"enabled": True},
-        "allow_force_pushes": {"enabled": False},
-        "allow_deletions": {"enabled": False},
-        "required_pull_request_reviews": {"required_approving_review_count": 0},
-    }
+    current = _protection_state(required_status_checks=None)
     assert repo_admin.branch_protection_up_to_date(current, []) is True
 
 
-async def test_branch_protection_worker_dry_run_ok_when_no_prs(monkeypatch):
+def _branch_protection_worker(
+    monkeypatch,
+    *,
+    dry_run,
+    shas=(),
+    contexts=(),
+    current=None,
+    status_code=200,
+    track_calls=False,
+):
     async def fake_shas(owner, name):
-        return []
+        return list(shas)
 
-    async def fake_api_request(*a, **k):
-        return _FakeResponse(404)
+    async def fake_contexts(owner, name, shas):
+        return list(contexts)
+
+    if current is not None:
+
+        class _ProtectionResponse(_FakeResponse):
+            def json(self):
+                return current
+
+        response = _ProtectionResponse(status_code)
+    else:
+        response = _FakeResponse(status_code)
+
+    calls = [] if track_calls else None
+
+    async def fake_api_request(method, *a, **k):
+        if calls is not None:
+            calls.append(method)
+        return response
 
     monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", fake_shas)
+    monkeypatch.setattr(repo_admin, "_check_run_contexts", fake_contexts)
     monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
-    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=True)
+    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=dry_run)
+    return (worker, calls) if track_calls else worker
+
+
+async def test_branch_protection_worker_dry_run_ok_when_no_prs(monkeypatch):
+    worker = _branch_protection_worker(monkeypatch, dry_run=True, status_code=404)
     result = await worker(REPO)
     assert result.status == Status.OK
     assert "no pull requests found yet" in result.line
@@ -567,19 +676,9 @@ async def test_branch_protection_worker_dry_run_ok_when_no_prs(monkeypatch):
 
 
 async def test_branch_protection_worker_dry_run_ok_when_no_check_runs(monkeypatch):
-    async def fake_shas(owner, name):
-        return ["sha"]
-
-    async def fake_contexts(owner, name, shas):
-        return []
-
-    async def fake_api_request(*a, **k):
-        return _FakeResponse(404)
-
-    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", fake_shas)
-    monkeypatch.setattr(repo_admin, "_check_run_contexts", fake_contexts)
-    monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
-    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=True)
+    worker = _branch_protection_worker(
+        monkeypatch, dry_run=True, shas=["sha"], status_code=404
+    )
     result = await worker(REPO)
     assert result.status == Status.OK
     assert "no check runs found" in result.line
@@ -609,19 +708,9 @@ async def test_branch_protection_worker_apply_ok_when_no_prs_yet(monkeypatch):
 async def test_branch_protection_worker_dry_run_limited_unchanged_when_plan_gated(
     monkeypatch,
 ):
-    async def fake_shas(owner, name):
-        return ["sha"]
-
-    async def fake_contexts(owner, name, shas):
-        return ["build"]
-
-    async def fake_api_request(*a, **k):
-        return _FakeResponse(403)
-
-    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", fake_shas)
-    monkeypatch.setattr(repo_admin, "_check_run_contexts", fake_contexts)
-    monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
-    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=True)
+    worker = _branch_protection_worker(
+        monkeypatch, dry_run=True, shas=["sha"], contexts=["build"], status_code=403
+    )
     result = await worker(REPO)
     assert result.status == Status.LIMITED_UNCHANGED
     assert result.line == (
@@ -632,19 +721,9 @@ async def test_branch_protection_worker_dry_run_limited_unchanged_when_plan_gate
 async def test_branch_protection_worker_apply_limited_unchanged_when_plan_gated(
     monkeypatch,
 ):
-    async def fake_shas(owner, name):
-        return ["sha"]
-
-    async def fake_contexts(owner, name, shas):
-        return ["build"]
-
-    async def fake_api_request(*a, **k):
-        return _FakeResponse(403)
-
-    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", fake_shas)
-    monkeypatch.setattr(repo_admin, "_check_run_contexts", fake_contexts)
-    monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
-    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=False)
+    worker = _branch_protection_worker(
+        monkeypatch, dry_run=False, shas=["sha"], contexts=["build"], status_code=403
+    )
     result = await worker(REPO)
     assert result.status == Status.LIMITED_UNCHANGED
     assert result.line == (
@@ -653,31 +732,13 @@ async def test_branch_protection_worker_apply_limited_unchanged_when_plan_gated(
 
 
 async def test_branch_protection_worker_dry_run_unchanged_line(monkeypatch):
-    async def fake_shas(owner, name):
-        return ["sha"]
-
-    async def fake_contexts(owner, name, shas):
-        return ["build", "test"]
-
-    current = {
-        "required_status_checks": {"contexts": ["build", "test"], "strict": True},
-        "enforce_admins": {"enabled": True},
-        "allow_force_pushes": {"enabled": False},
-        "allow_deletions": {"enabled": False},
-        "required_pull_request_reviews": {"required_approving_review_count": 0},
-    }
-
-    class _ProtectionResponse(_FakeResponse):
-        def json(self):
-            return current
-
-    async def fake_api_request(*a, **k):
-        return _ProtectionResponse(200)
-
-    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", fake_shas)
-    monkeypatch.setattr(repo_admin, "_check_run_contexts", fake_contexts)
-    monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
-    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=True)
+    worker = _branch_protection_worker(
+        monkeypatch,
+        dry_run=True,
+        shas=["sha"],
+        contexts=["build", "test"],
+        current=_protection_state(contexts=["build", "test"]),
+    )
     result = await worker(REPO)
     assert result.status == Status.UNCHANGED
     assert result.line == f"{'repo':<30} unchanged: build, test"
@@ -686,34 +747,14 @@ async def test_branch_protection_worker_dry_run_unchanged_line(monkeypatch):
 async def test_branch_protection_worker_apply_unchanged_when_already_protected(
     monkeypatch,
 ):
-    async def fake_shas(owner, name):
-        return ["sha"]
-
-    async def fake_contexts(owner, name, shas):
-        return ["build", "test"]
-
-    current = {
-        "required_status_checks": {"contexts": ["build", "test"], "strict": True},
-        "enforce_admins": {"enabled": True},
-        "allow_force_pushes": {"enabled": False},
-        "allow_deletions": {"enabled": False},
-        "required_pull_request_reviews": {"required_approving_review_count": 0},
-    }
-
-    class _ProtectionResponse(_FakeResponse):
-        def json(self):
-            return current
-
-    calls = []
-
-    async def fake_api_request(method, *a, **k):
-        calls.append(method)
-        return _ProtectionResponse(200)
-
-    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", fake_shas)
-    monkeypatch.setattr(repo_admin, "_check_run_contexts", fake_contexts)
-    monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
-    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=False)
+    worker, calls = _branch_protection_worker(
+        monkeypatch,
+        dry_run=False,
+        shas=["sha"],
+        contexts=["build", "test"],
+        current=_protection_state(contexts=["build", "test"]),
+        track_calls=True,
+    )
     result = await worker(REPO)
     assert result.status == Status.UNCHANGED
     assert result.line == f"{'repo':<30} unchanged: build, test"
@@ -724,75 +765,65 @@ async def test_branch_protection_worker_apply_unchanged_when_already_protected(
 async def test_branch_protection_worker_apply_ok_when_updating_from_stale_state(
     monkeypatch,
 ):
-    async def fake_shas(owner, name):
-        return ["sha"]
-
-    async def fake_contexts(owner, name, shas):
-        return ["build", "test"]
-
-    current = {
-        "required_status_checks": {"contexts": ["build"], "strict": True},
-        "enforce_admins": {"enabled": True},
-        "allow_force_pushes": {"enabled": False},
-        "allow_deletions": {"enabled": False},
-        "required_pull_request_reviews": {"required_approving_review_count": 0},
-    }
-
-    class _ProtectionResponse(_FakeResponse):
-        def json(self):
-            return current
-
-    async def fake_api_request(*a, **k):
-        return _ProtectionResponse(200)
-
-    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", fake_shas)
-    monkeypatch.setattr(repo_admin, "_check_run_contexts", fake_contexts)
-    monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
-    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=False)
+    worker = _branch_protection_worker(
+        monkeypatch,
+        dry_run=False,
+        shas=["sha"],
+        contexts=["build", "test"],
+        current=_protection_state(contexts=["build"]),
+    )
     result = await worker(REPO)
     assert result.status == Status.OK
     assert result.line == f"{'repo':<30} protected (build, test)"
     assert result.tag == repo_admin.Tag.APPLIED
 
 
-async def test_cmd_branch_protection_merges_exclude_list_into_skip(monkeypatch):
-    seen = {}
-
-    async def fake_list_repos(owner, *, only=None, skip=None):
-        seen["skip"] = skip
-        return []
-
+async def test_cmd_protection_sync_merges_exclude_list_into_skip(monkeypatch):
+    seen, fake_list_repos = _capturing_list_repos()
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
     monkeypatch.setattr(
         repo_admin, "default_branch_protection_exclude", lambda: {"homebrew-tap"}
     )
-    args = argparse.Namespace(only=None, skip="other-repo", dry_run=True)
-    await repo_admin.cmd_branch_protection(args)
+    args = argparse.Namespace(repos=[], skip="other-repo", dry_run=True, verbose=False)
+    await repo_admin.cmd_protection_sync(args)
     assert seen["skip"] == {"homebrew-tap", "other-repo"}
 
 
-async def test_cmd_branch_protection_excludes_even_without_explicit_skip(monkeypatch):
-    seen = {}
-
-    async def fake_list_repos(owner, *, only=None, skip=None):
-        seen["skip"] = skip
-        return []
-
+async def test_cmd_protection_sync_excludes_even_without_explicit_skip(monkeypatch):
+    seen, fake_list_repos = _capturing_list_repos()
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
     monkeypatch.setattr(
         repo_admin, "default_branch_protection_exclude", lambda: {"homebrew-tap"}
     )
-    args = argparse.Namespace(only=None, skip=None, dry_run=True)
-    await repo_admin.cmd_branch_protection(args)
+    args = argparse.Namespace(repos=[], skip=None, dry_run=True, verbose=False)
+    await repo_admin.cmd_protection_sync(args)
     assert seen["skip"] == {"homebrew-tap"}
 
 
+async def test_cmd_protection_sync_passes_verbose_to_run_parallel(monkeypatch):
+    seen = {}
+
+    async def fake_list_repos(owner, *, only=None, skip=None):
+        return [REPO]
+
+    async def fake_run_parallel(repos, worker, *, verbose=False, jobs=None):
+        seen["verbose"] = verbose
+        return []
+
+    monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
+    monkeypatch.setattr(repo_admin, "run_parallel", fake_run_parallel)
+    monkeypatch.setattr(repo_admin, "default_branch_protection_exclude", set)
+    args = argparse.Namespace(repos=[], skip=None, dry_run=True, verbose=True)
+    await repo_admin.cmd_protection_sync(args)
+    assert seen["verbose"] is True
+
+
 # ---------------------------------------------------------------------------
-# all
+# sync (meta)
 # ---------------------------------------------------------------------------
 
 
-async def test_cmd_all_runs_merge_settings_branch_protection_security_in_order(
+async def test_cmd_sync_runs_merge_protection_security_in_order(
     monkeypatch,
 ):
     calls = []
@@ -809,15 +840,15 @@ async def test_cmd_all_runs_merge_settings_branch_protection_security_in_order(
         calls.append("security-features")
         return 0
 
-    monkeypatch.setattr(repo_admin, "cmd_merge_settings", fake_merge_settings)
-    monkeypatch.setattr(repo_admin, "cmd_branch_protection", fake_branch_protection)
-    monkeypatch.setattr(repo_admin, "cmd_security_features", fake_security_features)
-    args = argparse.Namespace(dry_run=True, only=None, skip=None)
-    assert await repo_admin.cmd_all(args) == 0
+    monkeypatch.setattr(repo_admin, "cmd_merge_sync", fake_merge_settings)
+    monkeypatch.setattr(repo_admin, "cmd_protection_sync", fake_branch_protection)
+    monkeypatch.setattr(repo_admin, "cmd_security_sync", fake_security_features)
+    args = argparse.Namespace(dry_run=True, repos=[], skip=None, verbose=False)
+    assert await repo_admin.cmd_sync(args) == 0
     assert calls == ["merge-settings", "branch-protection", "security-features"]
 
 
-async def test_cmd_all_continues_after_a_command_fails_and_returns_nonzero(
+async def test_cmd_sync_continues_after_a_command_fails_and_returns_nonzero(
     monkeypatch,
 ):
     calls = []
@@ -834,36 +865,36 @@ async def test_cmd_all_continues_after_a_command_fails_and_returns_nonzero(
         calls.append("security-features")
         return 0
 
-    monkeypatch.setattr(repo_admin, "cmd_merge_settings", failing)
-    monkeypatch.setattr(repo_admin, "cmd_branch_protection", fake_branch_protection)
-    monkeypatch.setattr(repo_admin, "cmd_security_features", fake_security_features)
-    args = argparse.Namespace(dry_run=True, only=None, skip=None)
-    assert await repo_admin.cmd_all(args) == 1
+    monkeypatch.setattr(repo_admin, "cmd_merge_sync", failing)
+    monkeypatch.setattr(repo_admin, "cmd_protection_sync", fake_branch_protection)
+    monkeypatch.setattr(repo_admin, "cmd_security_sync", fake_security_features)
+    args = argparse.Namespace(dry_run=True, repos=[], skip=None, verbose=False)
+    assert await repo_admin.cmd_sync(args) == 1
     assert calls == ["merge-settings", "branch-protection", "security-features"]
 
 
-async def test_cmd_all_returns_nonzero_when_a_command_returns_nonzero(monkeypatch):
+async def test_cmd_sync_returns_nonzero_when_a_command_returns_nonzero(monkeypatch):
     async def fake_one(args):
         return 1
 
     async def fake_zero(args):
         return 0
 
-    monkeypatch.setattr(repo_admin, "cmd_merge_settings", fake_one)
-    monkeypatch.setattr(repo_admin, "cmd_branch_protection", fake_zero)
-    monkeypatch.setattr(repo_admin, "cmd_security_features", fake_zero)
-    args = argparse.Namespace(dry_run=True, only=None, skip=None)
-    assert await repo_admin.cmd_all(args) == 1
+    monkeypatch.setattr(repo_admin, "cmd_merge_sync", fake_one)
+    monkeypatch.setattr(repo_admin, "cmd_protection_sync", fake_zero)
+    monkeypatch.setattr(repo_admin, "cmd_security_sync", fake_zero)
+    args = argparse.Namespace(dry_run=True, repos=[], skip=None, verbose=False)
+    assert await repo_admin.cmd_sync(args) == 1
 
 
-def test_all_subcommand_is_registered_in_parser():
-    args = repo_admin.build_parser().parse_args(["all", "--dry-run"])
-    assert args.func == repo_admin.cmd_all
+def test_sync_subcommand_is_registered_in_parser():
+    args = repo_admin.build_parser().parse_args(["sync", "--dry-run"])
+    assert args.func == repo_admin.cmd_sync
     assert args.dry_run is True
 
 
 # ---------------------------------------------------------------------------
-# pages-domain
+# pages sync
 # ---------------------------------------------------------------------------
 
 DOMAIN = "awesome-jj.larve.net"
@@ -1012,17 +1043,12 @@ async def test_pages_domain_worker_dry_run_limited_unchanged_when_cert_pending(
     assert result.status == Status.LIMITED_UNCHANGED
 
 
-async def test_pages_domain_worker_apply_sets_cname(monkeypatch):
+def _pages_domain_apply_worker(monkeypatch, responses):
     calls = []
-    responses = iter(
-        [
-            {"cname": None, "https_enforced": False},
-            {"cname": DOMAIN, "https_enforced": False},
-        ]
-    )
+    response_iter = iter(responses)
 
     async def fake_pages_config(owner, name):
-        return next(responses)
+        return next(response_iter)
 
     async def fake_api_json(method, path, **kwargs):
         calls.append((method, path, kwargs.get("json")))
@@ -1032,6 +1058,17 @@ async def test_pages_domain_worker_apply_sets_cname(monkeypatch):
     monkeypatch.setattr(repo_admin, "api_json", fake_api_json)
     worker = repo_admin.make_pages_domain_worker(
         owner="hugoh", dry_run=False, domains={"repo": DOMAIN}
+    )
+    return worker, calls
+
+
+async def test_pages_domain_worker_apply_sets_cname(monkeypatch):
+    worker, calls = _pages_domain_apply_worker(
+        monkeypatch,
+        [
+            {"cname": None, "https_enforced": False},
+            {"cname": DOMAIN, "https_enforced": False},
+        ],
     )
     result = await worker(REPO)
     assert result.status == Status.LIMITED
@@ -1039,8 +1076,8 @@ async def test_pages_domain_worker_apply_sets_cname(monkeypatch):
 
 
 async def test_pages_domain_worker_apply_enables_https_when_cert_ready(monkeypatch):
-    calls = []
-    responses = iter(
+    worker, calls = _pages_domain_apply_worker(
+        monkeypatch,
         [
             {
                 "cname": DOMAIN,
@@ -1048,20 +1085,7 @@ async def test_pages_domain_worker_apply_enables_https_when_cert_ready(monkeypat
                 "https_certificate": {"state": "approved"},
             },
             {"cname": DOMAIN, "https_enforced": True},
-        ]
-    )
-
-    async def fake_pages_config(owner, name):
-        return next(responses)
-
-    async def fake_api_json(method, path, **kwargs):
-        calls.append((method, path, kwargs.get("json")))
-        return {}
-
-    monkeypatch.setattr(repo_admin, "_pages_config", fake_pages_config)
-    monkeypatch.setattr(repo_admin, "api_json", fake_api_json)
-    worker = repo_admin.make_pages_domain_worker(
-        owner="hugoh", dry_run=False, domains={"repo": DOMAIN}
+        ],
     )
     result = await worker(REPO)
     assert result.status == Status.OK
@@ -1084,40 +1108,36 @@ async def test_pages_domain_worker_apply_unchanged_when_already_at_target(monkey
     assert result.status == Status.UNCHANGED
 
 
-async def test_cmd_pages_domain_defaults_to_mapped_repos(monkeypatch):
+async def test_cmd_pages_sync_defaults_to_mapped_repos(monkeypatch):
     monkeypatch.setattr(
         repo_admin.lib, "default_pages_domains", lambda: {"awesome-jj": DOMAIN}
     )
-    seen = {}
-
-    async def fake_list_repos(owner, *, only=None, skip=None):
-        seen["only"] = only
-        seen["skip"] = skip
-        return []
-
+    seen, fake_list_repos = _capturing_list_repos()
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
-    args = argparse.Namespace(dry_run=True, only=None, skip=None)
-    assert await repo_admin.cmd_pages_domain(args) == 0
+    args = argparse.Namespace(dry_run=True, repos=[], skip=None, verbose=False)
+    assert await repo_admin.cmd_pages_sync(args) == 0
     assert seen == {"only": {"awesome-jj"}, "skip": None}
 
 
-async def test_cmd_pages_domain_errors_on_unmapped_only_repo(monkeypatch, capsys):
+async def test_cmd_pages_sync_errors_on_unmapped_repo(monkeypatch, capsys):
     monkeypatch.setattr(
         repo_admin.lib, "default_pages_domains", lambda: {"awesome-jj": DOMAIN}
     )
-    args = argparse.Namespace(dry_run=True, only="not-mapped", skip=None)
-    assert await repo_admin.cmd_pages_domain(args) == 1
+    args = argparse.Namespace(
+        dry_run=True, repos=["not-mapped"], skip=None, verbose=False
+    )
+    assert await repo_admin.cmd_pages_sync(args) == 1
     assert "not-mapped" in capsys.readouterr().err
 
 
-def test_pages_domain_subcommand_is_registered_in_parser():
-    args = repo_admin.build_parser().parse_args(["pages-domain", "--dry-run"])
-    assert args.func == repo_admin.cmd_pages_domain
+def test_pages_sync_subcommand_is_registered_in_parser():
+    args = repo_admin.build_parser().parse_args(["pages", "sync", "--dry-run"])
+    assert args.func == repo_admin.cmd_pages_sync
     assert args.dry_run is True
 
 
 # ---------------------------------------------------------------------------
-# pages-status
+# pages status
 # ---------------------------------------------------------------------------
 
 
@@ -1167,7 +1187,7 @@ async def test_cmd_pages_status_lists_enabled_repos_and_flags_unmapped(
         repo_admin.lib, "default_pages_domains", lambda: {"awesome-jj": DOMAIN}
     )
 
-    args = argparse.Namespace(only=None, skip=None)
+    args = argparse.Namespace(repos=[], skip=None)
     assert await repo_admin.cmd_pages_status(args) == 0
     out = capsys.readouterr().out
     assert "awesome-jj" in out
@@ -1175,17 +1195,17 @@ async def test_cmd_pages_status_lists_enabled_repos_and_flags_unmapped(
     assert "no-pages" not in out
     assert f"https://{DOMAIN}" in out
     assert "https://hugoh.github.io/other-repo/" in out
-    assert "not in pages-domains.yaml" in out
-    assert "other-repo" in out.split("not in pages-domains.yaml")[1]
+    assert "not in config/pages-domains.yaml" in out
+    assert "other-repo" in out.split("not in config/pages-domains.yaml")[1]
 
 
 def test_pages_status_subcommand_is_registered_in_parser():
-    args = repo_admin.build_parser().parse_args(["pages-status"])
+    args = repo_admin.build_parser().parse_args(["pages", "status"])
     assert args.func == repo_admin.cmd_pages_status
 
 
 # ---------------------------------------------------------------------------
-# pages-domain-config
+# pages config
 # ---------------------------------------------------------------------------
 
 
@@ -1201,21 +1221,23 @@ def test_pages_domain_suggest_replaces_dots_in_repo_name_with_dashes():
     )
 
 
-async def test_cmd_pages_domain_config_uses_explicit_only_without_api_calls(
+async def test_cmd_pages_config_uses_explicit_repos_without_api_calls(
     monkeypatch, capsys
 ):
     async def fail_list_repos(*a, **k):
         raise AssertionError("should not query GitHub when --only is given")
 
     monkeypatch.setattr(repo_admin, "list_repos", fail_list_repos)
-    args = argparse.Namespace(domain="larve.net", only="awesome-jj,hrd", skip=None)
-    assert await repo_admin.cmd_pages_domain_config(args) == 0
+    args = argparse.Namespace(
+        domain="larve.net", repos=["awesome-jj", "hrd"], skip=None
+    )
+    assert await repo_admin.cmd_pages_config(args) == 0
     out = capsys.readouterr().out
     assert "awesome-jj: awesome-jj.larve.net" in out
     assert "hrd: hrd.larve.net" in out
 
 
-async def test_cmd_pages_domain_config_auto_discovers_unmapped_enabled_repos(
+async def test_cmd_pages_config_auto_discovers_unmapped_enabled_repos(
     monkeypatch, capsys
 ):
     mapped_repo = Repo(
@@ -1243,16 +1265,279 @@ async def test_cmd_pages_domain_config_auto_discovers_unmapped_enabled_repos(
         repo_admin.lib, "default_pages_domains", lambda: {"awesome-jj": DOMAIN}
     )
 
-    args = argparse.Namespace(domain="larve.net", only=None, skip=None)
-    assert await repo_admin.cmd_pages_domain_config(args) == 0
+    args = argparse.Namespace(domain="larve.net", repos=[], skip=None)
+    assert await repo_admin.cmd_pages_config(args) == 0
     out = capsys.readouterr().out
     assert "AppBadgeWatcher-spoon.larve.net" in out
     assert "awesome-jj" not in out
 
 
-def test_pages_domain_config_subcommand_is_registered_in_parser():
+def test_pages_config_subcommand_is_registered_in_parser():
     args = repo_admin.build_parser().parse_args(
-        ["pages-domain-config", "--domain", "larve.net"]
+        ["pages", "config", "--domain", "larve.net"]
     )
-    assert args.func == repo_admin.cmd_pages_domain_config
+    assert args.func == repo_admin.cmd_pages_config
     assert args.domain == "larve.net"
+
+
+# ---------------------------------------------------------------------------
+# secrets sync
+# ---------------------------------------------------------------------------
+
+
+def test_secrets_sync_line_dry_run():
+    assert repo_admin.secrets_sync_line("NAME", "repo", dry_run=True) == (
+        f"{'repo':<30} would set NAME"
+    )
+
+
+def test_secrets_sync_line_apply():
+    assert repo_admin.secrets_sync_line("NAME", "repo", dry_run=False) == (
+        f"{'repo':<30} set NAME"
+    )
+
+
+async def test_secrets_sync_worker_dry_run_does_not_call_set_repo_secret(monkeypatch):
+    async def fail_set_repo_secret(*a, **k):
+        raise AssertionError("dry-run should not call set_repo_secret")
+
+    monkeypatch.setattr(repo_admin.lib, "set_repo_secret", fail_set_repo_secret)
+    worker = repo_admin.make_secrets_sync_worker(
+        owner="hugoh", dry_run=True, secret_name="NAME", value="the-value"
+    )
+    result = await worker(REPO)
+    assert result.status == Status.OK
+    assert "would set NAME" in result.line
+
+
+async def test_secrets_sync_worker_apply_calls_set_repo_secret(monkeypatch):
+    calls = []
+
+    async def fake_set_repo_secret(owner, repo_name, secret_name, value):
+        calls.append((owner, repo_name, secret_name, value))
+
+    monkeypatch.setattr(repo_admin.lib, "set_repo_secret", fake_set_repo_secret)
+    worker = repo_admin.make_secrets_sync_worker(
+        owner="hugoh", dry_run=False, secret_name="NAME", value="the-value"
+    )
+    result = await worker(REPO)
+    assert result.status == Status.OK
+    assert calls == [("hugoh", "repo", "NAME", "the-value")]
+
+
+def _recording_list_repos():
+    seen_only = []
+
+    async def fake_list_repos(owner, *, only=None, skip=None):
+        seen_only.append(only)
+        return []
+
+    return seen_only, fake_list_repos
+
+
+async def test_cmd_secrets_sync_defaults_to_all_configured_secrets(monkeypatch):
+    monkeypatch.setattr(
+        repo_admin.lib,
+        "default_secrets",
+        lambda: {"NAME_A": ["repo-a"], "NAME_B": ["repo-b"]},
+    )
+    monkeypatch.setattr(
+        repo_admin.lib, "decrypt_secrets", lambda: {"NAME_A": "va", "NAME_B": "vb"}
+    )
+    seen_only, fake_list_repos = _recording_list_repos()
+    monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
+    args = argparse.Namespace(
+        dry_run=False, repos=[], skip=None, secret=None, verbose=False
+    )
+    assert await repo_admin.cmd_secrets_sync(args) == 0
+    assert sorted(seen_only, key=str) == [{"repo-a"}, {"repo-b"}]
+
+
+async def test_cmd_secrets_sync_skips_secret_when_filters_leave_no_repos(monkeypatch):
+    monkeypatch.setattr(
+        repo_admin.lib, "default_secrets", lambda: {"NAME_A": ["repo-a"]}
+    )
+    monkeypatch.setattr(repo_admin.lib, "decrypt_secrets", lambda: {"NAME_A": "va"})
+
+    async def fake_list_repos(owner, *, only=None, skip=None):
+        raise AssertionError(
+            "must not call list_repos when the target repo set is empty"
+        )
+
+    monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
+    args = argparse.Namespace(
+        dry_run=False, repos=[], skip="repo-a", secret=None, verbose=False
+    )
+    assert await repo_admin.cmd_secrets_sync(args) == 0
+
+
+async def test_cmd_secrets_sync_errors_on_unknown_secret_name(monkeypatch, capsys):
+    monkeypatch.setattr(
+        repo_admin.lib, "default_secrets", lambda: {"NAME_A": ["repo-a"]}
+    )
+
+    def fail_decrypt_secrets():
+        raise AssertionError("should not decrypt when --secret is unknown")
+
+    monkeypatch.setattr(repo_admin.lib, "decrypt_secrets", fail_decrypt_secrets)
+    args = argparse.Namespace(
+        dry_run=True, repos=[], skip=None, secret="NOT_CONFIGURED", verbose=False
+    )
+    assert await repo_admin.cmd_secrets_sync(args) == 1
+    assert "NOT_CONFIGURED" in capsys.readouterr().err
+
+
+async def test_cmd_secrets_sync_only_filters_within_each_secrets_repo_list(monkeypatch):
+    monkeypatch.setattr(
+        repo_admin.lib,
+        "default_secrets",
+        lambda: {
+            "NAME_A": ["repo-a", "repo-shared"],
+            "NAME_B": ["repo-b", "repo-shared"],
+        },
+    )
+    monkeypatch.setattr(
+        repo_admin.lib, "decrypt_secrets", lambda: {"NAME_A": "va", "NAME_B": "vb"}
+    )
+    seen_only, fake_list_repos = _recording_list_repos()
+    monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
+    args = argparse.Namespace(
+        dry_run=False, repos=["repo-shared"], skip=None, secret=None, verbose=False
+    )
+    assert await repo_admin.cmd_secrets_sync(args) == 0
+    assert sorted(seen_only, key=str) == [{"repo-shared"}, {"repo-shared"}]
+
+
+async def test_cmd_secrets_sync_skips_secret_missing_from_encrypted_file(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        repo_admin.lib,
+        "default_secrets",
+        lambda: {"NAME_A": ["repo-a"], "NAME_B": ["repo-b"]},
+    )
+    monkeypatch.setattr(repo_admin.lib, "decrypt_secrets", lambda: {"NAME_B": "vb"})
+    processed, fake_list_repos = _recording_list_repos()
+    monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
+    args = argparse.Namespace(
+        dry_run=False, repos=[], skip=None, secret=None, verbose=False
+    )
+    assert await repo_admin.cmd_secrets_sync(args) == 1
+    err = capsys.readouterr().err
+    assert "NAME_A" in err
+    assert processed == [{"repo-b"}]
+
+
+async def test_cmd_secrets_sync_dry_run_never_calls_decrypt_secrets(monkeypatch):
+    monkeypatch.setattr(
+        repo_admin.lib, "default_secrets", lambda: {"NAME_A": ["repo-a"]}
+    )
+
+    def fail_decrypt_secrets():
+        raise AssertionError("dry-run should not call decrypt_secrets")
+
+    monkeypatch.setattr(repo_admin.lib, "decrypt_secrets", fail_decrypt_secrets)
+
+    async def fake_list_repos(owner, *, only=None, skip=None):
+        return []
+
+    monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
+    args = argparse.Namespace(
+        dry_run=True, repos=[], skip=None, secret=None, verbose=False
+    )
+    assert await repo_admin.cmd_secrets_sync(args) == 0
+
+
+def test_secrets_sync_subcommand_is_registered_in_parser():
+    args = repo_admin.build_parser().parse_args(
+        ["secrets", "sync", "--dry-run", "--secret", "NAME"]
+    )
+    assert args.func == repo_admin.cmd_secrets_sync
+    assert args.secret == "NAME"
+
+
+# ---------------------------------------------------------------------------
+# secrets edit
+# ---------------------------------------------------------------------------
+
+
+def test_secrets_edit_template_seeds_empty_values_for_each_name():
+    assert repo_admin.secrets_edit_template({"NAME_B", "NAME_A"}) == (
+        "NAME_A: ''\nNAME_B: ''\n"
+    )
+
+
+async def test_cmd_secrets_edit_errors_when_no_secrets_configured(monkeypatch, capsys):
+    monkeypatch.setattr(repo_admin.lib, "default_secrets", dict)
+    args = argparse.Namespace()
+    assert await repo_admin.cmd_secrets_edit(args) == 1
+    assert "no secrets configured" in capsys.readouterr().err
+
+
+async def test_cmd_secrets_edit_seeds_file_when_missing(monkeypatch):
+    monkeypatch.setattr(repo_admin.lib, "default_secrets", lambda: {"NAME": ["repo-a"]})
+    monkeypatch.setattr(repo_admin.lib, "SECRETS_ENC_FILE", _MissingPath())
+    seeded = []
+    monkeypatch.setattr(repo_admin.lib, "init_secrets_file", seeded.append)
+    monkeypatch.setattr(repo_admin.lib, "edit_secrets_file", lambda: 0)
+    monkeypatch.setattr(repo_admin.lib, "decrypt_secrets", lambda: {"NAME": "v"})
+
+    args = argparse.Namespace()
+    assert await repo_admin.cmd_secrets_edit(args) == 0
+    assert seeded == ["NAME: ''\n"]
+
+
+async def test_cmd_secrets_edit_does_not_seed_file_when_already_present(monkeypatch):
+    monkeypatch.setattr(repo_admin.lib, "default_secrets", lambda: {"NAME": ["repo-a"]})
+    monkeypatch.setattr(repo_admin.lib, "SECRETS_ENC_FILE", _PresentPath())
+
+    def fail_init(*a, **k):
+        raise AssertionError("should not seed when the file already exists")
+
+    monkeypatch.setattr(repo_admin.lib, "init_secrets_file", fail_init)
+    monkeypatch.setattr(repo_admin.lib, "edit_secrets_file", lambda: 0)
+    monkeypatch.setattr(repo_admin.lib, "decrypt_secrets", lambda: {"NAME": "v"})
+
+    args = argparse.Namespace()
+    assert await repo_admin.cmd_secrets_edit(args) == 0
+
+
+async def test_cmd_secrets_edit_returns_error_when_sops_exits_nonzero(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(repo_admin.lib, "default_secrets", lambda: {"NAME": ["repo-a"]})
+    monkeypatch.setattr(repo_admin.lib, "SECRETS_ENC_FILE", _PresentPath())
+    monkeypatch.setattr(repo_admin.lib, "edit_secrets_file", lambda: 1)
+
+    def fail_decrypt():
+        raise AssertionError("should not validate when the edit itself failed")
+
+    monkeypatch.setattr(repo_admin.lib, "decrypt_secrets", fail_decrypt)
+
+    args = argparse.Namespace()
+    assert await repo_admin.cmd_secrets_edit(args) == 1
+    assert "sops" in capsys.readouterr().err
+
+
+async def test_cmd_secrets_edit_warns_about_missing_and_stale_keys(monkeypatch, capsys):
+    monkeypatch.setattr(
+        repo_admin.lib,
+        "default_secrets",
+        lambda: {"NAME_A": ["repo-a"], "NAME_B": ["repo-b"]},
+    )
+    monkeypatch.setattr(repo_admin.lib, "SECRETS_ENC_FILE", _PresentPath())
+    monkeypatch.setattr(repo_admin.lib, "edit_secrets_file", lambda: 0)
+    monkeypatch.setattr(
+        repo_admin.lib, "decrypt_secrets", lambda: {"NAME_A": "v", "OLD_NAME": "stale"}
+    )
+
+    args = argparse.Namespace()
+    assert await repo_admin.cmd_secrets_edit(args) == 0
+    err = capsys.readouterr().err
+    assert "NAME_B" in err
+    assert "OLD_NAME" in err
+
+
+def test_secrets_edit_subcommand_is_registered_in_parser():
+    args = repo_admin.build_parser().parse_args(["secrets", "edit"])
+    assert args.func == repo_admin.cmd_secrets_edit

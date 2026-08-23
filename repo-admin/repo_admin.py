@@ -1,30 +1,42 @@
 """Bulk-applies account-wide GitHub repo settings across hugoh's non-archived
 repos, via the GitHub REST API (authenticated through `gh auth token`).
 
-Usage: repo_admin.py <command> [--dry-run] [--only name1,name2] [--skip name1,name2]
+Usage: repo_admin.py <resource> <verb> [repo ...] [--dry-run] [--verbose] [--skip name1,name2]
 
-Commands:
-  list                list repos as a table: name, default branch, private, fork
-  merge-settings      enable auto-merge, delete-branch-on-merge, and PR-branch
-                       auto-update
-  branch-protection   apply a baseline branch-protection policy to each repo's
-                       default branch
-  security-features   enable free, native GitHub security features
-  all                 run merge-settings, branch-protection, and
-                       security-features in sequence
-  pages-domain        set each repo's GitHub Pages custom domain, from the
-                       mapping in pages-domains.yaml
-  pages-status        list repos with GitHub Pages enabled and their custom
-                       domain, flagging ones missing from pages-domains.yaml
-  pages-domain-config print pages-domains.yaml entries to stdout for a base
-                       domain (--domain), for --only repos or, if omitted,
-                       repos pages-status would flag as unmapped
+  repos    list                 list repos as a table: name, default branch,
+                                 private, fork
+  merge    sync                 enable auto-merge, delete-branch-on-merge,
+                                 and PR-branch auto-update
+  protection sync               apply a baseline branch-protection policy to
+                                 each repo's default branch
+  security sync                 enable free, native GitHub security features
+  sync                          run merge/protection/security sync, in that
+                                 order
+  pages    status               list repos with GitHub Pages enabled and
+                                 their custom domain, flagging ones missing
+                                 from config/pages-domains.yaml
+  pages    sync                 set each repo's GitHub Pages custom domain,
+                                 from the mapping in config/pages-domains.yaml
+  pages    config --domain D    print config/pages-domains.yaml entries to
+                                 stdout for a base domain, for the given
+                                 repos or, if none given, repos `pages
+                                 status` would flag as unmapped
+  secrets  sync                 push shared GitHub Actions secrets
+                                 (config/secrets.yaml -> repos, values from
+                                 sops-encrypted config/secrets.enc.yaml) to
+                                 each configured repo
+  secrets  edit                 open config/secrets.enc.yaml in `sops` for
+                                 interactive editing, seeding it from
+                                 config/secrets.yaml the first time
 
-Forks are excluded by default -- except those listed in include-forks.txt;
-edit that file to add more, or override per-run with GH_INCLUDE_FORKS
+Every `<resource> <verb>` accepts trailing repo names to scope to a subset
+(default: every repo); `--skip name1,name2` excludes instead. Forks are
+excluded by default -- except those listed in config/include-forks.txt; edit
+that file to add more, or override per-run with GH_INCLUDE_FORKS
 (comma-separated). GH_OWNER overrides the default owner (hugoh); GH_JOBS
 controls parallelism (default 6). Run a mutating command with --dry-run
-first and review the output.
+first and review the output; `--verbose` shows every repo, not just the
+ones that changed.
 """
 
 from __future__ import annotations
@@ -35,6 +47,7 @@ import enum
 import sys
 
 import lib
+import yaml
 from lib import (
     DEFAULT_JOBS,
     DEFAULT_OWNER,
@@ -66,17 +79,24 @@ class Tag(enum.StrEnum):
     UNAVAILABLE = "unavailable"
 
 
+async def list_repos_for_args(
+    args: argparse.Namespace, *, extra_skip: set[str] | None = None
+) -> list[Repo]:
+    skip = as_set(args.skip) or set()
+    if extra_skip:
+        skip |= extra_skip
+    return await list_repos(DEFAULT_OWNER, only=set(args.repos) or None, skip=skip)
+
+
 # ---------------------------------------------------------------------------
-# list
+# repos list
 # ---------------------------------------------------------------------------
 
 
-async def cmd_list(args: argparse.Namespace) -> int:
+async def cmd_repos_list(args: argparse.Namespace) -> int:
     with lib.progress_bar(transient=True) as progress:
         progress.add_task("Fetching repos...", total=None)
-        repos = await list_repos(
-            DEFAULT_OWNER, only=as_set(args.only), skip=as_set(args.skip)
-        )
+        repos = await list_repos_for_args(args)
 
     table = Table()
     table.add_column("NAME")
@@ -92,13 +112,21 @@ async def cmd_list(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# merge-settings
+# merge sync
 #
 # Enables auto-merge, delete-branch-on-merge, and PR-branch auto-update. The
 # last one matters because branch protection requires PR branches to be up
 # to date with the base branch (`strict: true`) -- without auto-update,
 # auto-merge PRs get stuck needing a manual "Update branch" click whenever
 # another PR merges first.
+#
+# allow_auto_merge on a private repo silently no-ops on this account's plan
+# (private-repo auto-merge needs GitHub Pro/Team/Enterprise) -- confirmed by
+# a live PATCH against a private repo returning 200 with the field still
+# false. GET always reports the real current value, so dry-run can't tell
+# this apart from "would enable" without attempting the write; instead it's
+# reported as unavailable, the same way security-features reports its own
+# plan-gated fields.
 # ---------------------------------------------------------------------------
 
 MERGE_SETTINGS_FIELDS = [
@@ -106,6 +134,10 @@ MERGE_SETTINGS_FIELDS = [
     "delete_branch_on_merge",
     "allow_update_branch",
 ]
+
+
+def _merge_gated_fields(*, is_private: bool) -> list[str]:
+    return ["allow_auto_merge"] if is_private else []
 
 
 async def _merge_settings(owner: str, name: str) -> dict:
@@ -117,11 +149,32 @@ def merge_settings_at_target(settings: dict) -> bool:
     return all(settings[field] for field in MERGE_SETTINGS_FIELDS)
 
 
-def merge_settings_dry_run_line(name: str, current: dict, status: Status) -> str:
-    would_enable = [field for field in MERGE_SETTINGS_FIELDS if not current[field]]
+def merge_settings_summarize(current: dict, *, is_private: bool = False) -> dict:
+    gated = set(_merge_gated_fields(is_private=is_private))
+    return {
+        "would_enable": [
+            field
+            for field in MERGE_SETTINGS_FIELDS
+            if field not in gated and not current[field]
+        ],
+        "unavailable": [
+            field
+            for field in MERGE_SETTINGS_FIELDS
+            if field in gated and not current[field]
+        ],
+    }
+
+
+def merge_settings_dry_run_line(
+    name: str, current: dict, status: Status, *, is_private: bool = False
+) -> str:
+    summary = merge_settings_summarize(current, is_private=is_private)
+    would_enable, unavailable = summary["would_enable"], summary["unavailable"]
     detail = (
         str(current) if not would_enable else f"would enable: {', '.join(would_enable)}"
     )
+    if unavailable:
+        detail += f" (unavailable: {', '.join(unavailable)})"
     return result_line(name, detail, status)
 
 
@@ -136,11 +189,21 @@ def make_merge_settings_worker(owner: str, dry_run: bool):
     async def worker(repo: Repo) -> RepoResult:
         if dry_run:
             current = await _merge_settings(owner, repo.name)
-            status = (
-                Status.UNCHANGED if merge_settings_at_target(current) else Status.OK
-            )
+            summary = merge_settings_summarize(current, is_private=repo.is_private)
+            if summary["would_enable"]:
+                status = Status.LIMITED if summary["unavailable"] else Status.OK
+            else:
+                status = (
+                    Status.LIMITED_UNCHANGED
+                    if summary["unavailable"]
+                    else Status.UNCHANGED
+                )
             return RepoResult(
-                repo, merge_settings_dry_run_line(repo.name, current, status), status
+                repo,
+                merge_settings_dry_run_line(
+                    repo.name, current, status, is_private=repo.is_private
+                ),
+                status,
             )
 
         before = await _merge_settings(owner, repo.name)
@@ -160,16 +223,18 @@ def make_merge_settings_worker(owner: str, dry_run: bool):
     return worker
 
 
-async def cmd_merge_settings(args: argparse.Namespace) -> int:
-    repos = await list_repos(
-        DEFAULT_OWNER, only=as_set(args.only), skip=as_set(args.skip)
+async def cmd_merge_sync(args: argparse.Namespace) -> int:
+    repos = await list_repos_for_args(args)
+    await run_parallel(
+        repos,
+        make_merge_settings_worker(DEFAULT_OWNER, args.dry_run),
+        verbose=args.verbose,
     )
-    await run_parallel(repos, make_merge_settings_worker(DEFAULT_OWNER, args.dry_run))
     return 0
 
 
 # ---------------------------------------------------------------------------
-# security-features
+# security sync
 #
 # Enables free, native GitHub security features:
 #   - Dependabot vulnerability alerts -- works on every repo, no plan gate
@@ -327,12 +392,12 @@ def make_security_features_worker(owner: str, dry_run: bool):
     return worker
 
 
-async def cmd_security_features(args: argparse.Namespace) -> int:
-    repos = await list_repos(
-        DEFAULT_OWNER, only=as_set(args.only), skip=as_set(args.skip)
-    )
+async def cmd_security_sync(args: argparse.Namespace) -> int:
+    repos = await list_repos_for_args(args)
     results = await run_parallel(
-        repos, make_security_features_worker(DEFAULT_OWNER, args.dry_run)
+        repos,
+        make_security_features_worker(DEFAULT_OWNER, args.dry_run),
+        verbose=args.verbose,
     )
 
     if args.dry_run:
@@ -348,7 +413,7 @@ async def cmd_security_features(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# branch-protection
+# protection sync
 #
 # Applies a baseline branch-protection policy (required status checks, PR
 # required with 0 approvals, enforce-for-admins, no force-push/deletion) to
@@ -569,11 +634,14 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
     return worker
 
 
-async def cmd_branch_protection(args: argparse.Namespace) -> int:
-    skip = (as_set(args.skip) or set()) | default_branch_protection_exclude()
-    repos = await list_repos(DEFAULT_OWNER, only=as_set(args.only), skip=skip)
+async def cmd_protection_sync(args: argparse.Namespace) -> int:
+    repos = await list_repos_for_args(
+        args, extra_skip=default_branch_protection_exclude()
+    )
     results = await run_parallel(
-        repos, make_branch_protection_worker(DEFAULT_OWNER, args.dry_run)
+        repos,
+        make_branch_protection_worker(DEFAULT_OWNER, args.dry_run),
+        verbose=args.verbose,
     )
 
     if args.dry_run:
@@ -601,11 +669,11 @@ async def cmd_branch_protection(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# pages-domain
+# pages sync
 #
-# Sets each repo's GitHub Pages custom domain from pages-domains.yaml -- the
-# single source of truth also read by iac/cloudflare's OpenTofu config to
-# generate the matching CNAME/verification DNS records. Unlike the other
+# Sets each repo's GitHub Pages custom domain from config/pages-domains.yaml
+# -- the single source of truth also read by iac/cloudflare's OpenTofu
+# config to generate the matching CNAME/verification DNS records. Unlike the other
 # commands, this doesn't apply the same setting account-wide: only repos
 # listed in the mapping are touched.
 #
@@ -714,14 +782,14 @@ def make_pages_domain_worker(owner: str, dry_run: bool, domains: dict[str, str])
     return worker
 
 
-async def cmd_pages_domain(args: argparse.Namespace) -> int:
+async def cmd_pages_sync(args: argparse.Namespace) -> int:
     domains = lib.default_pages_domains()
-    only = as_set(args.only)
+    only = set(args.repos)
     if only:
         unknown = only - set(domains)
         if unknown:
             print(
-                f"error: not in pages-domains.yaml: {', '.join(sorted(unknown))}",
+                f"error: not in config/pages-domains.yaml: {', '.join(sorted(unknown))}",
                 file=sys.stderr,
             )
             return 1
@@ -730,17 +798,19 @@ async def cmd_pages_domain(args: argparse.Namespace) -> int:
 
     repos = await list_repos(DEFAULT_OWNER, only=only, skip=as_set(args.skip))
     await run_parallel(
-        repos, make_pages_domain_worker(DEFAULT_OWNER, args.dry_run, domains)
+        repos,
+        make_pages_domain_worker(DEFAULT_OWNER, args.dry_run, domains),
+        verbose=args.verbose,
     )
     return 0
 
 
 # ---------------------------------------------------------------------------
-# pages-status
+# pages status
 #
 # Read-only survey of which repos have GitHub Pages enabled and what custom
-# domain (if any) they're currently serving -- lets pages-domains.yaml be
-# checked for repos that have Pages on but aren't mapped yet.
+# domain (if any) they're currently serving -- lets config/pages-domains.yaml
+# be checked for repos that have Pages on but aren't mapped yet.
 # ---------------------------------------------------------------------------
 
 
@@ -783,9 +853,7 @@ async def _pages_enabled_repos(repos: list[Repo]) -> list[tuple[Repo, dict]]:
 async def cmd_pages_status(args: argparse.Namespace) -> int:
     with lib.progress_bar(transient=True) as progress:
         progress.add_task("Fetching repos...", total=None)
-        repos = await list_repos(
-            DEFAULT_OWNER, only=as_set(args.only), skip=as_set(args.skip)
-        )
+        repos = await list_repos_for_args(args)
 
     enabled = await _pages_enabled_repos(repos)
     domains = lib.default_pages_domains()
@@ -812,21 +880,23 @@ async def cmd_pages_status(args: argparse.Namespace) -> int:
     missing = sorted(repo.name for repo, _config in enabled if repo.name not in domains)
     if missing:
         print()
-        print(f"Pages enabled but not in pages-domains.yaml: {' '.join(missing)}")
+        print(
+            f"Pages enabled but not in config/pages-domains.yaml: {' '.join(missing)}"
+        )
 
     return 0
 
 
 # ---------------------------------------------------------------------------
-# pages-domain-config
+# pages config
 #
-# Prints pages-domains.yaml-formatted entries to stdout for a base domain --
-# `<repo> -> <repo>.<domain>`, dots in the repo name replaced with dashes
-# since a raw dot would split a hostname across two DNS labels instead of
-# one. With --only, generates for exactly those repos (no API calls). With
-# neither, auto-discovers repos with Pages enabled but missing from
-# pages-domains.yaml -- the same set `pages-status` flags -- and suggests
-# entries for those.
+# Prints config/pages-domains.yaml-formatted entries to stdout for a base
+# domain -- `<repo> -> <repo>.<domain>`, dots in the repo name replaced with
+# dashes since a raw dot would split a hostname across two DNS labels
+# instead of one. Given repo names, generates for exactly those repos (no
+# API calls). With none, auto-discovers repos with Pages enabled but
+# missing from config/pages-domains.yaml -- the same set `pages status`
+# flags -- and suggests entries for those.
 # ---------------------------------------------------------------------------
 
 
@@ -834,8 +904,8 @@ def pages_domain_suggest(repo_name: str, domain: str) -> str:
     return f"{repo_name.replace('.', '-')}.{domain}"
 
 
-async def cmd_pages_domain_config(args: argparse.Namespace) -> int:
-    only = as_set(args.only)
+async def cmd_pages_config(args: argparse.Namespace) -> int:
+    only = set(args.repos)
     if only:
         names = sorted(only)
     else:
@@ -853,22 +923,167 @@ async def cmd_pages_domain_config(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# all
+# secrets sync
+#
+# Pushes shared GitHub Actions secrets (e.g. TAP_GITHUB_TOKEN) to their
+# configured repos, via GitHub's REST API (lib.set_repo_secret, using
+# PyNaCl to encrypt for each repo's public key) -- consistent with every
+# other mutating command here, unlike shelling out to `gh secret set`.
+# Secret names -> target repos come from config/secrets.yaml
+# (git-committed, plaintext); values come from config/secrets.enc.yaml,
+# decrypted once via `sops -d` at the start of the run.
+#
+# GitHub's API never returns a secret's existing value (only its
+# last-updated timestamp, not a meaningful diff signal here), so there's no
+# "unchanged" detection -- every apply run is an unconditional set, and
+# dry-run just reports what would be set.
+#
+# A secret maps to many repos and a repo can receive multiple secrets, so
+# this loops per-secret (its own list_repos + run_parallel call each) --
+# the same non-aborting chaining cmd_sync does across sub-commands, so one
+# secret's failure doesn't stop the next secret's sync.
 # ---------------------------------------------------------------------------
 
 
-async def cmd_all(args: argparse.Namespace) -> int:
-    """Runs merge-settings, branch-protection, then security-features in
-    that order (matching the README's ordering -- merge-settings' PR-branch
-    auto-update makes branch-protection's auto-merge-friendly baseline
-    behave as intended). One command failing doesn't stop the others; the
-    exit code is nonzero if any of them failed.
+def secrets_sync_line(secret_name: str, repo_name: str, *, dry_run: bool) -> str:
+    detail = f"would set {secret_name}" if dry_run else f"set {secret_name}"
+    return result_line(repo_name, detail, Status.OK)
+
+
+def make_secrets_sync_worker(owner: str, dry_run: bool, secret_name: str, value: str):
+    async def worker(repo: Repo) -> RepoResult:
+        line = secrets_sync_line(secret_name, repo.name, dry_run=dry_run)
+        if not dry_run:
+            await lib.set_repo_secret(owner, repo.name, secret_name, value)
+        return RepoResult(repo, line, Status.OK)
+
+    return worker
+
+
+async def cmd_secrets_sync(args: argparse.Namespace) -> int:
+    config = lib.default_secrets()
+    secret_names = as_set(args.secret)
+    if secret_names:
+        unknown = secret_names - set(config)
+        if unknown:
+            print(
+                f"error: not in config/secrets.yaml: {', '.join(sorted(unknown))}",
+                file=sys.stderr,
+            )
+            return 1
+    else:
+        secret_names = set(config)
+
+    values = lib.decrypt_secrets() if not args.dry_run else {}
+
+    only = set(args.repos)
+    skip = as_set(args.skip)
+    failed = False
+    for secret_name in sorted(secret_names):
+        target_repos = set(config[secret_name])
+        if only:
+            target_repos &= only
+        if skip:
+            target_repos -= skip
+
+        if not target_repos:
+            print(f"== {secret_name} == (no matching repos, skipping)")
+            continue
+
+        if not args.dry_run and secret_name not in values:
+            print(
+                f"error: {secret_name!r} has no value in config/secrets.enc.yaml",
+                file=sys.stderr,
+            )
+            failed = True
+            continue
+
+        print(f"== {secret_name} ==")
+        repos = await list_repos(DEFAULT_OWNER, only=target_repos)
+        try:
+            await run_parallel(
+                repos,
+                make_secrets_sync_worker(
+                    DEFAULT_OWNER,
+                    args.dry_run,
+                    secret_name,
+                    values.get(secret_name, ""),
+                ),
+                verbose=args.verbose,
+            )
+        except GhError as exc:
+            print(exc, file=sys.stderr)
+            failed = True
+
+    return 1 if failed else 0
+
+
+# ---------------------------------------------------------------------------
+# secrets edit
+#
+# Opens config/secrets.enc.yaml in `sops` for interactive editing (decrypts
+# to $EDITOR, re-encrypts on save) -- the first time, seeds it pre-populated
+# with every config/secrets.yaml key (empty values) so there's something to
+# fill in rather than requiring the user to hand-write sops' metadata
+# block. After editing, warns about drift against config/secrets.yaml: a
+# configured secret with no value set, or a value left over from a
+# removed/renamed secret.
+# ---------------------------------------------------------------------------
+
+
+def secrets_edit_template(secret_names: set[str]) -> str:
+    return yaml.safe_dump({name: "" for name in sorted(secret_names)}, sort_keys=False)
+
+
+async def cmd_secrets_edit(args: argparse.Namespace) -> int:
+    secret_names = set(lib.default_secrets())
+    if not secret_names:
+        print("error: no secrets configured in config/secrets.yaml", file=sys.stderr)
+        return 1
+
+    if not lib.SECRETS_ENC_FILE.exists():
+        print(f"creating {lib.SECRETS_ENC_FILE.name}...")
+        lib.init_secrets_file(secrets_edit_template(secret_names))
+
+    if lib.edit_secrets_file() != 0:
+        print(
+            "error: sops exited with a nonzero status; changes may not be saved",
+            file=sys.stderr,
+        )
+        return 1
+
+    values = lib.decrypt_secrets()
+    missing = secret_names - set(values)
+    stale = set(values) - secret_names
+    if missing:
+        print(
+            f"warning: no value set for: {', '.join(sorted(missing))}", file=sys.stderr
+        )
+    if stale:
+        print(
+            f"warning: not in config/secrets.yaml (stale?): {', '.join(sorted(stale))}",
+            file=sys.stderr,
+        )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# sync (meta)
+# ---------------------------------------------------------------------------
+
+
+async def cmd_sync(args: argparse.Namespace) -> int:
+    """Runs merge, protection, then security sync in that order (matching
+    the README's ordering -- merge sync's PR-branch auto-update makes
+    protection sync's auto-merge-friendly baseline behave as intended). One
+    command failing doesn't stop the others; the exit code is nonzero if
+    any of them failed.
     """
     failed = False
     for name, cmd in (
-        ("merge-settings", cmd_merge_settings),
-        ("branch-protection", cmd_branch_protection),
-        ("security-features", cmd_security_features),
+        ("merge sync", cmd_merge_sync),
+        ("protection sync", cmd_protection_sync),
+        ("security sync", cmd_security_sync),
     ):
         print(f"== {name} ==")
         try:
@@ -889,43 +1104,61 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    resources = parser.add_subparsers(dest="resource", required=True)
 
-    filter_parent = argparse.ArgumentParser(add_help=False)
-    filter_parent.add_argument("--only", help="comma-separated repo names to include")
-    filter_parent.add_argument("--skip", help="comma-separated repo names to exclude")
+    repo_scope = argparse.ArgumentParser(add_help=False)
+    repo_scope.add_argument(
+        "repos", nargs="*", metavar="REPO", help="repo names to target (default: all)"
+    )
+    repo_scope.add_argument("--skip", help="comma-separated repo names to exclude")
 
-    mutating_parent = argparse.ArgumentParser(add_help=False, parents=[filter_parent])
-    mutating_parent.add_argument(
+    mutating = argparse.ArgumentParser(add_help=False, parents=[repo_scope])
+    mutating.add_argument(
         "--dry-run",
         action="store_true",
         help="show what would change, without changing anything",
     )
+    mutating.add_argument(
+        "--verbose",
+        action="store_true",
+        help="show unchanged repos too, not just changes",
+    )
 
-    subparsers.add_parser("list", parents=[filter_parent]).set_defaults(func=cmd_list)
-    subparsers.add_parser("merge-settings", parents=[mutating_parent]).set_defaults(
-        func=cmd_merge_settings
+    def resource_verbs(name: str) -> argparse._SubParsersAction:
+        return resources.add_parser(name).add_subparsers(dest="verb", required=True)
+
+    resource_verbs("repos").add_parser("list", parents=[repo_scope]).set_defaults(
+        func=cmd_repos_list
     )
-    subparsers.add_parser("branch-protection", parents=[mutating_parent]).set_defaults(
-        func=cmd_branch_protection
+    resource_verbs("merge").add_parser("sync", parents=[mutating]).set_defaults(
+        func=cmd_merge_sync
     )
-    subparsers.add_parser("security-features", parents=[mutating_parent]).set_defaults(
-        func=cmd_security_features
+    resource_verbs("protection").add_parser("sync", parents=[mutating]).set_defaults(
+        func=cmd_protection_sync
     )
-    subparsers.add_parser("all", parents=[mutating_parent]).set_defaults(func=cmd_all)
-    subparsers.add_parser("pages-domain", parents=[mutating_parent]).set_defaults(
-        func=cmd_pages_domain
+    resource_verbs("security").add_parser("sync", parents=[mutating]).set_defaults(
+        func=cmd_security_sync
     )
-    subparsers.add_parser("pages-status", parents=[filter_parent]).set_defaults(
-        func=cmd_pages_status
-    )
-    pages_domain_config_parser = subparsers.add_parser(
-        "pages-domain-config", parents=[filter_parent]
-    )
-    pages_domain_config_parser.add_argument(
+    resources.add_parser("sync", parents=[mutating]).set_defaults(func=cmd_sync)
+
+    pages = resource_verbs("pages")
+    pages.add_parser("status", parents=[repo_scope]).set_defaults(func=cmd_pages_status)
+    pages.add_parser("sync", parents=[mutating]).set_defaults(func=cmd_pages_sync)
+    pages_config_parser = pages.add_parser("config", parents=[repo_scope])
+    pages_config_parser.add_argument(
         "--domain", required=True, help="base domain, e.g. larve.net"
     )
-    pages_domain_config_parser.set_defaults(func=cmd_pages_domain_config)
+    pages_config_parser.set_defaults(func=cmd_pages_config)
+
+    secrets = resource_verbs("secrets")
+    secrets_sync_parser = secrets.add_parser("sync", parents=[mutating])
+    secrets_sync_parser.add_argument(
+        "--secret",
+        help="comma-separated secret names to sync (default: all in "
+        "config/secrets.yaml)",
+    )
+    secrets_sync_parser.set_defaults(func=cmd_secrets_sync)
+    secrets.add_parser("edit").set_defaults(func=cmd_secrets_edit)
 
     return parser
 

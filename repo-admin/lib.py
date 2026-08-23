@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import enum
 import os
 import subprocess
@@ -13,15 +14,20 @@ from typing import Any
 
 import httpx2
 import yaml
+from nacl import encoding, public
 from rich.console import Console
 from rich.progress import Progress
 
 LIB_DIR = Path(__file__).resolve().parent
+CONFIG_DIR = LIB_DIR / "config"
 API_BASE = "https://api.github.com"
 DEFAULT_OWNER = os.environ.get("GH_OWNER", "hugoh")
 DEFAULT_JOBS = int(os.environ.get("GH_JOBS", "6"))
-PAGES_DOMAINS_FILE = LIB_DIR / "pages-domains.yaml"
-BRANCH_PROTECTION_EXCLUDE_FILE = LIB_DIR / "branch-protection-exclude.txt"
+PAGES_DOMAINS_FILE = CONFIG_DIR / "pages-domains.yaml"
+BRANCH_PROTECTION_EXCLUDE_FILE = CONFIG_DIR / "branch-protection-exclude.txt"
+SECRETS_FILE = CONFIG_DIR / "secrets.yaml"
+SECRETS_ENC_FILE = CONFIG_DIR / "secrets.enc.yaml"
+SOPS_CONFIG_FILE = CONFIG_DIR / ".sops.yaml"
 
 console = Console()
 
@@ -236,7 +242,7 @@ def default_include_forks() -> set[str]:
     env_value = os.environ.get("GH_INCLUDE_FORKS")
     if env_value is not None:
         return as_set(env_value) or set()
-    forks_file = LIB_DIR / "include-forks.txt"
+    forks_file = CONFIG_DIR / "include-forks.txt"
     forks = set()
     for line in forks_file.read_text().splitlines():
         stripped = line.strip()
@@ -280,6 +286,127 @@ def default_pages_domains() -> dict[str, str]:
     iac/cloudflare's OpenTofu config to generate matching DNS records.
     """
     return yaml.safe_load(PAGES_DOMAINS_FILE.read_text()) or {}
+
+
+def default_secrets() -> dict[str, list[str]]:
+    """Secret name -> target repo list, read from secrets.yaml -- the
+    plaintext half of the secrets-sync config; values live sops-encrypted
+    in secrets.enc.yaml (see decrypt_secrets()).
+    """
+    raw = yaml.safe_load(SECRETS_FILE.read_text()) or {}
+    return {name: cfg.get("repos", []) for name, cfg in raw.items()}
+
+
+def decrypt_secrets() -> dict[str, str]:
+    """Decrypts secrets.enc.yaml via `sops -d`, returning secret name ->
+    value. Shells out rather than using a sops Python binding -- same
+    external-trusted-CLI style as _auth_token()'s `gh auth token` call.
+    """
+    if not SECRETS_ENC_FILE.exists():
+        raise GhError(
+            f"{SECRETS_ENC_FILE.name} not found -- create it with `sops` "
+            "(see repo-admin/config/.sops.yaml)"
+        )
+    try:
+        result = subprocess.run(
+            ["sops", "-d", str(SECRETS_ENC_FILE)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise GhError("sops not found on PATH") from exc
+    if result.returncode != 0:
+        raise GhError(
+            f"sops -d {SECRETS_ENC_FILE.name} failed: {result.stderr.strip()}"
+        )
+    data = yaml.safe_load(result.stdout) or {}
+    data.pop("sops", None)  # sops metadata block, not a secret
+    return data
+
+
+def init_secrets_file(template_yaml: str) -> None:
+    """Seeds secrets.enc.yaml via `sops --encrypt`, from a plaintext YAML
+    template (typically one empty value per configured secret name) --
+    lets secrets-edit create the file pre-populated with the right keys
+    instead of the user hand-writing sops' metadata block themselves.
+
+    --filename-override is required here: sops picks a creation rule by
+    matching .sops.yaml's path_regex against the file being encrypted, but
+    the content comes from stdin (/dev/stdin), which matches nothing --
+    the override tells sops to match rules as if encrypting
+    SECRETS_ENC_FILE itself. --config is required too: sops discovers
+    .sops.yaml by walking up from the *current working directory*, not
+    from the (overridden) file path, so without it this breaks whenever
+    repo-admin.sh is invoked from outside repo-admin/.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "sops",
+                "--encrypt",
+                "--config",
+                str(SOPS_CONFIG_FILE),
+                "--filename-override",
+                str(SECRETS_ENC_FILE),
+                "--input-type",
+                "yaml",
+                "--output-type",
+                "yaml",
+                "/dev/stdin",
+            ],
+            input=template_yaml,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise GhError("sops not found on PATH") from exc
+    if result.returncode != 0:
+        raise GhError(f"sops --encrypt failed: {result.stderr.strip()}")
+    SECRETS_ENC_FILE.write_text(result.stdout)
+
+
+def edit_secrets_file() -> int:
+    """Opens secrets.enc.yaml in `sops` -- decrypts to $EDITOR, re-encrypts
+    on save -- inheriting this process's stdio (not captured) since sops
+    needs a real terminal/editor session. Returns sops' exit code.
+    """
+    try:
+        result = subprocess.run(["sops", str(SECRETS_ENC_FILE)], check=False)
+    except FileNotFoundError as exc:
+        raise GhError("sops not found on PATH") from exc
+    return result.returncode
+
+
+def encrypt_secret_value(public_key_b64: str, value: str) -> str:
+    """Encrypts `value` for GitHub's Actions secrets API using a repo's
+    public key, per GitHub's documented libsodium sealed-box scheme.
+    """
+    public_key = public.PublicKey(
+        public_key_b64.encode("utf-8"), encoding.Base64Encoder
+    )
+    encrypted = public.SealedBox(public_key).encrypt(value.encode("utf-8"))
+    return base64.b64encode(encrypted).decode("utf-8")
+
+
+async def set_repo_secret(
+    owner: str, repo_name: str, secret_name: str, value: str
+) -> None:
+    """Sets one repo's Actions secret via GitHub's REST API: fetches the
+    repo's current public key, encrypts `value` for it, and PUTs the
+    result. The plaintext value never leaves this process -- it's
+    encrypted in memory before the request body is built.
+    """
+    key_data = await api_json(
+        "GET", f"/repos/{owner}/{repo_name}/actions/secrets/public-key"
+    )
+    encrypted_value = encrypt_secret_value(key_data["key"], value)
+    await api_json(
+        "PUT",
+        f"/repos/{owner}/{repo_name}/actions/secrets/{secret_name}",
+        json={"encrypted_value": encrypted_value, "key_id": key_data["key_id"]},
+    )
 
 
 def filter_repos(
@@ -339,8 +466,11 @@ def as_set(value: str | None) -> set[str] | None:
     return {v.strip() for v in value.split(",") if v.strip()}
 
 
+_QUIET_STATUSES = (Status.UNCHANGED, Status.LIMITED_UNCHANGED)
+
+
 async def run_parallel(
-    repos: list[Repo], worker, jobs: int = DEFAULT_JOBS
+    repos: list[Repo], worker, jobs: int = DEFAULT_JOBS, verbose: bool = False
 ) -> list[RepoResult]:
     """Runs worker(repo) for each repo concurrently (bounded by a semaphore
     -- these are I/O-bound `gh`/network calls, not CPU-bound work), printing
@@ -354,15 +484,23 @@ async def run_parallel(
     raises). Instead it's printed as a failure line and collected; once
     every repo has been attempted, any failures are raised together as a
     single GhError so the run still ends with a nonzero exit.
+
+    Unless verbose=True, a repo already at its target (UNCHANGED /
+    LIMITED_UNCHANGED) isn't printed live -- on a real account-wide run the
+    handful of lines that represent an actual change would otherwise be
+    lost in a wall of "unchanged: ..." lines. Suppressed lines are counted
+    and reported as a single dim summary line instead.
     """
     results: list[RepoResult] = []
     failed_names: list[str] = []
+    unchanged_count = 0
     sem = asyncio.Semaphore(jobs)
 
     with progress_bar() as progress:
         task = progress.add_task("Processing repos...", total=len(repos))
 
         async def call(repo: Repo) -> None:
+            nonlocal unchanged_count
             async with sem:
                 try:
                     result = await worker(repo)
@@ -370,7 +508,10 @@ async def run_parallel(
                     failed_names.append(repo.name)
                     print_status(Status.FAILED, f"{repo.name}: {exc}")
                 else:
-                    print_status(result.status, result.line)
+                    if not verbose and result.status in _QUIET_STATUSES:
+                        unchanged_count += 1
+                    else:
+                        print_status(result.status, result.line)
                     results.append(result)
                 finally:
                     progress.advance(task)
@@ -378,6 +519,12 @@ async def run_parallel(
         async with asyncio.TaskGroup() as tg:
             for repo in repos:
                 tg.create_task(call(repo))
+
+    if unchanged_count:
+        console.print(
+            f"  {unchanged_count} unchanged (rerun with --verbose to see them)",
+            style="dim",
+        )
 
     if failed_names:
         raise GhError(
