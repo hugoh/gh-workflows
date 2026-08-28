@@ -85,10 +85,11 @@ uv run repo_admin.py <resource> <verb> [repo ...] \
   `GH_BRANCH_PROTECTION_EXCLUDE`.
 - **`security sync [--dry-run]`** — enables Dependabot vulnerability
   alerts (all repos, free), plus secret scanning, secret scanning push
-  protection, Dependabot security updates, and private vulnerability
-  reporting (public repos only — private repos need GitHub Advanced
-  Security, a paid add-on this account's plan doesn't include; such repos
-  are reported as unavailable, not failed).
+  protection, Dependabot security updates, private vulnerability
+  reporting, and CodeQL code scanning default setup (public repos only —
+  private repos need GitHub Advanced Security, a paid add-on this
+  account's plan doesn't include; such repos are reported as unavailable,
+  not failed, as are repos with no CodeQL-supported language).
 - **`sync [--dry-run]`** — runs `merge sync`, `protection sync`, then
   `security sync` in sequence. One command failing doesn't stop the
   others; the exit code is nonzero if any of them failed.

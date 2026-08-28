@@ -246,6 +246,8 @@ async def cmd_merge_sync(args: argparse.Namespace) -> int:
 #     security updates -- public repos only; private repos need GitHub
 #     Advanced Security, a paid add-on this account's plan doesn't include
 #   - private vulnerability reporting -- same public-repo-only gate
+#   - CodeQL code scanning default setup -- same public-repo-only gate, and
+#     also unavailable on repos with no CodeQL-supported language
 #
 # Repos where a feature is unavailable are reported, not treated as a
 # failure -- same approach as branch-protection's private-repo handling.
@@ -253,7 +255,11 @@ async def cmd_merge_sync(args: argparse.Namespace) -> int:
 
 
 def security_summarize(
-    repo_json: dict, *, vuln_alerts_enabled: bool, pvr_json: dict | None
+    repo_json: dict,
+    *,
+    vuln_alerts_enabled: bool,
+    pvr_json: dict | None,
+    codeql_json: dict | None,
 ) -> dict:
     sec = repo_json.get("security_and_analysis") or {}
     features = {
@@ -274,6 +280,10 @@ def security_summarize(
         "private_vuln_reporting": (
             (pvr_json or {}).get("enabled") is True,
             pvr_json is not None,
+        ),
+        "code_scanning": (
+            (codeql_json or {}).get("state") == "configured",
+            codeql_json is not None,
         ),
     }
     return {
@@ -300,7 +310,7 @@ def security_dry_run_line(name: str, summary: dict, status: Status) -> str:
 
 async def _fetch_security_state(
     owner: str, name: str
-) -> tuple[dict, bool, dict | None]:
+) -> tuple[dict, bool, dict | None, dict | None]:
     repo_json = await api_json("GET", f"/repos/{owner}/{name}")
 
     # 204 = enabled, 404 = disabled -- GitHub's documented shape for this
@@ -322,16 +332,33 @@ async def _fetch_security_state(
         raise GhError(error_message(pvr_response), status_code=pvr_response.status_code)
     pvr_json = pvr_response.json() if pvr_response.status_code == 200 else None
 
-    return repo_json, vuln_alerts_enabled, pvr_json
+    # 200 = available (body has "state"), 404/403 = not available on this
+    # plan or repo (no Advanced Security, GHES, or no supported language).
+    codeql_response = await api_request(
+        "GET", f"/repos/{owner}/{name}/code-scanning/default-setup"
+    )
+    if codeql_response.status_code not in (200, 403, 404):
+        raise GhError(
+            error_message(codeql_response), status_code=codeql_response.status_code
+        )
+    codeql_json = codeql_response.json() if codeql_response.status_code == 200 else None
+
+    return repo_json, vuln_alerts_enabled, pvr_json, codeql_json
 
 
 def make_security_features_worker(owner: str, dry_run: bool):
     async def worker(repo: Repo) -> RepoResult:
-        repo_json, vuln_alerts_enabled, pvr_json = await _fetch_security_state(
-            owner, repo.name
-        )
+        (
+            repo_json,
+            vuln_alerts_enabled,
+            pvr_json,
+            codeql_json,
+        ) = await _fetch_security_state(owner, repo.name)
         before_summary = security_summarize(
-            repo_json, vuln_alerts_enabled=vuln_alerts_enabled, pvr_json=pvr_json
+            repo_json,
+            vuln_alerts_enabled=vuln_alerts_enabled,
+            pvr_json=pvr_json,
+            codeql_json=codeql_json,
         )
 
         if dry_run:
@@ -377,6 +404,20 @@ def make_security_features_worker(owner: str, dry_run: bool):
         elif not pvr_response.is_success:
             raise GhError(
                 error_message(pvr_response), status_code=pvr_response.status_code
+            )
+
+        # 403/404 = not available on this plan or repo; 422 = no
+        # CodeQL-supported language detected in the repo.
+        codeql_response = await api_request(
+            "PATCH",
+            f"/repos/{owner}/{repo.name}/code-scanning/default-setup",
+            json={"state": "configured"},
+        )
+        if codeql_response.status_code in (403, 404, 422):
+            unavailable.append("code scanning")
+        elif not codeql_response.is_success:
+            raise GhError(
+                error_message(codeql_response), status_code=codeql_response.status_code
             )
 
         status = classify_status(
