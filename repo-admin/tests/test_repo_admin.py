@@ -308,7 +308,10 @@ def test_security_summarize_all_available_and_enabled():
         }
     }
     summary = repo_admin.security_summarize(
-        repo_json, vuln_alerts_enabled=True, pvr_json={"enabled": True}
+        repo_json,
+        vuln_alerts_enabled=True,
+        pvr_json={"enabled": True},
+        codeql_json={"state": "configured"},
     )
     assert summary == {"would_enable": [], "unavailable": []}
 
@@ -322,24 +325,33 @@ def test_security_summarize_reports_would_enable():
         }
     }
     summary = repo_admin.security_summarize(
-        repo_json, vuln_alerts_enabled=False, pvr_json={"enabled": True}
+        repo_json,
+        vuln_alerts_enabled=False,
+        pvr_json={"enabled": True},
+        codeql_json={"state": "not-configured"},
     )
-    assert set(summary["would_enable"]) == {"vuln_alerts", "secret_scanning"}
+    assert set(summary["would_enable"]) == {
+        "vuln_alerts",
+        "secret_scanning",
+        "code_scanning",
+    }
     assert summary["unavailable"] == []
 
 
 def test_security_summarize_reports_unavailable_for_private_repo():
     # Private repos without GitHub Advanced Security: these keys are absent
-    # from security_and_analysis, and private-vulnerability-reporting 404s.
+    # from security_and_analysis, and private-vulnerability-reporting and
+    # code-scanning default setup both 404.
     repo_json = {"security_and_analysis": {}}
     summary = repo_admin.security_summarize(
-        repo_json, vuln_alerts_enabled=True, pvr_json=None
+        repo_json, vuln_alerts_enabled=True, pvr_json=None, codeql_json=None
     )
     assert set(summary["unavailable"]) == {
         "secret_scanning",
         "push_protection",
         "dependabot_updates",
         "private_vuln_reporting",
+        "code_scanning",
     }
     assert summary["would_enable"] == []
 
@@ -370,6 +382,7 @@ FULLY_ENABLED_REPO_JSON = {
     }
 }
 UNAVAILABLE_REPO_JSON = {"security_and_analysis": {}}
+CONFIGURED_CODEQL_JSON = {"state": "configured"}
 
 
 class _FakeResponse:
@@ -391,10 +404,17 @@ class _FakeResponseWithJson(_FakeResponse):
 
 
 def _security_worker(
-    monkeypatch, *, repo_json, vuln_alerts_enabled, pvr_json, dry_run, api_responses=()
+    monkeypatch,
+    *,
+    repo_json,
+    vuln_alerts_enabled,
+    pvr_json,
+    dry_run,
+    codeql_json=None,
+    api_responses=(),
 ):
     async def fake_fetch_security_state(owner, name):
-        return repo_json, vuln_alerts_enabled, pvr_json
+        return repo_json, vuln_alerts_enabled, pvr_json, codeql_json
 
     responses_iter = iter(api_responses)
 
@@ -416,6 +436,7 @@ async def test_security_worker_dry_run_unchanged_when_fully_enabled(monkeypatch)
         repo_json=FULLY_ENABLED_REPO_JSON,
         vuln_alerts_enabled=True,
         pvr_json={"enabled": True},
+        codeql_json=CONFIGURED_CODEQL_JSON,
         dry_run=True,
     )
     assert (await worker(REPO)).status == Status.UNCHANGED
@@ -427,6 +448,7 @@ async def test_security_worker_dry_run_ok_when_would_enable(monkeypatch):
         repo_json=FULLY_ENABLED_REPO_JSON,
         vuln_alerts_enabled=False,
         pvr_json={"enabled": True},
+        codeql_json=CONFIGURED_CODEQL_JSON,
         dry_run=True,
     )
     assert (await worker(REPO)).status == Status.OK
@@ -464,8 +486,9 @@ async def test_security_worker_apply_unchanged_when_already_fully_enabled(monkey
         repo_json=FULLY_ENABLED_REPO_JSON,
         vuln_alerts_enabled=True,
         pvr_json={"enabled": True},
+        codeql_json=CONFIGURED_CODEQL_JSON,
         dry_run=False,
-        api_responses=[_FakeResponse(200), _FakeResponse(200)],
+        api_responses=[_FakeResponse(200), _FakeResponse(200), _FakeResponse(200)],
     )
     result = await worker(REPO)
     assert result.status == Status.UNCHANGED
@@ -478,8 +501,9 @@ async def test_security_worker_apply_ok_when_newly_enabled(monkeypatch):
         repo_json=FULLY_ENABLED_REPO_JSON,
         vuln_alerts_enabled=False,
         pvr_json={"enabled": True},
+        codeql_json=CONFIGURED_CODEQL_JSON,
         dry_run=False,
-        api_responses=[_FakeResponse(200), _FakeResponse(200)],
+        api_responses=[_FakeResponse(200), _FakeResponse(200), _FakeResponse(200)],
     )
     assert (await worker(REPO)).status == Status.OK
 
@@ -492,8 +516,9 @@ async def test_security_worker_apply_limited_unchanged_when_unavailable_and_noth
         repo_json=UNAVAILABLE_REPO_JSON,
         vuln_alerts_enabled=True,
         pvr_json=None,
+        codeql_json=None,
         dry_run=False,
-        api_responses=[_FakeResponse(422), _FakeResponse(404)],
+        api_responses=[_FakeResponse(422), _FakeResponse(404), _FakeResponse(404)],
     )
     assert (await worker(REPO)).status == Status.LIMITED_UNCHANGED
 
@@ -506,10 +531,28 @@ async def test_security_worker_apply_limited_when_unavailable_and_was_pending(
         repo_json=UNAVAILABLE_REPO_JSON,
         vuln_alerts_enabled=False,
         pvr_json=None,
+        codeql_json=None,
         dry_run=False,
-        api_responses=[_FakeResponse(422), _FakeResponse(404)],
+        api_responses=[_FakeResponse(422), _FakeResponse(404), _FakeResponse(404)],
     )
     assert (await worker(REPO)).status == Status.LIMITED
+
+
+async def test_security_worker_apply_reports_code_scanning_unavailable_for_no_supported_language(
+    monkeypatch,
+):
+    worker = _security_worker(
+        monkeypatch,
+        repo_json=FULLY_ENABLED_REPO_JSON,
+        vuln_alerts_enabled=True,
+        pvr_json={"enabled": True},
+        codeql_json=None,
+        dry_run=False,
+        api_responses=[_FakeResponse(200), _FakeResponse(200), _FakeResponse(422)],
+    )
+    result = await worker(REPO)
+    assert result.status == Status.LIMITED_UNCHANGED
+    assert "code scanning" in result.line
 
 
 # ---------------------------------------------------------------------------
