@@ -96,7 +96,10 @@ uv run repo_admin.py <resource> <verb> [repo ...] \
   convention `go-tools`' `mise run gh-repo-setup` already established.
   Required contexts are detected from the most recent pull request's check
   runs (not the default branch tip — see `repo_admin.py`'s header comment
-  for why). `--dry-run` diffs each repo's current protection against the
+  for why), limited to jobs from the repo's own `.github/workflows/` files:
+  third-party apps and GitHub-managed setups (CodeQL default setup's
+  "Analyze (...)", the "github-advanced-security" check) never become merge
+  gates. `--dry-run` diffs each repo's current protection against the
   baseline and prints "unchanged: ..." or "would update", rather than just
   showing what would be required. Private repos on a plan without
   branch-protection access are reported, not failed. Repos listed in

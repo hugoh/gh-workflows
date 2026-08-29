@@ -483,6 +483,14 @@ async def cmd_security_sync(args: argparse.Namespace) -> int:
 # shouldn't be able to block merges as a side effect of having run once on a
 # PR.
 #
+# Even under the "github-actions" app, GitHub-managed setups post checks the
+# repo can't edit: CodeQL default setup runs as a synthetic "CodeQL" workflow
+# ("Analyze (...)" jobs) and Advanced Security posts a "github-advanced-security"
+# check, both from `dynamic/...` workflow paths rather than a file in the repo's
+# `.github/workflows/`. Each check run links to its workflow run via a shared
+# check-suite id, so contexts are kept only when that suite belongs to a
+# workflow run whose path is under `.github/workflows/`.
+#
 # Private repos on a plan that doesn't expose branch protection return a 403
 # ("Upgrade to GitHub Pro..."); those are collected and reported at the end
 # rather than treated as a hard failure.
@@ -500,6 +508,11 @@ def branch_protection_payload(contexts: list[str]) -> dict:
         "allow_force_pushes": False,
         "allow_deletions": False,
     }
+
+
+def current_protection_contexts(current: dict | None) -> list[str]:
+    required_status_checks = (current or {}).get("required_status_checks") or {}
+    return sorted(required_status_checks.get("contexts") or [])
 
 
 def branch_protection_up_to_date(current: dict | None, contexts: list[str]) -> bool:
@@ -554,6 +567,25 @@ async def _github_actions_check_runs(owner: str, name: str, sha: str) -> list[di
     ]
 
 
+async def _own_workflow_check_suite_ids(owner: str, name: str, sha: str) -> set[int]:
+    """check-suite ids of workflow runs defined by files in `.github/workflows/`.
+
+    GitHub-managed setups (CodeQL default setup, the Advanced Security findings
+    run) execute under synthetic `dynamic/...` paths; their checks shouldn't
+    become merge gates the repo can't edit.
+    """
+    runs = await api_json(
+        "GET",
+        f"/repos/{owner}/{name}/actions/runs",
+        params={"head_sha": sha, "per_page": "100"},
+    )
+    return {
+        run["check_suite_id"]
+        for run in runs["workflow_runs"]
+        if run["path"].startswith(".github/workflows/")
+    }
+
+
 async def _check_run_contexts(owner: str, name: str, shas: list[str]) -> list[str]:
     """Contexts to require, sampled from the most recent PR's head commit.
 
@@ -569,6 +601,8 @@ async def _check_run_contexts(owner: str, name: str, shas: list[str]) -> list[st
     short recent-PR window.
     """
     latest_runs = await _github_actions_check_runs(owner, name, shas[0])
+    own_suites = await _own_workflow_check_suite_ids(owner, name, shas[0])
+    latest_runs = [run for run in latest_runs if run["check_suite"]["id"] in own_suites]
     contexts = {run["name"] for run in latest_runs}
     suspect = {
         run["name"]
@@ -649,7 +683,11 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
                 detail = f"{require_desc}{suffix}"
                 return RepoResult(repo, result_line(repo.name, detail, status), status)
             status = Status.OK
-            detail = f"would update -> require: {require_desc}{suffix}"
+            old_contexts = current_protection_contexts(current)
+            was_desc = ", ".join(old_contexts) if old_contexts else "(none yet)"
+            detail = (
+                f"would update -> require: {require_desc} (was: {was_desc}){suffix}"
+            )
             return RepoResult(repo, result_line(repo.name, detail, status), status)
 
         if up_to_date:
