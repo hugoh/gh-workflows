@@ -1,0 +1,41 @@
+name: tool-bumps
+description: >
+  Emit a JSON map of which mise.toml [tools] entries changed since a base git
+  ref. Requires the repo checked out with full history (fetch-depth: 0).
+inputs:
+  base-ref:
+    description: >
+      Base git ref to diff against. When empty, it is derived from the event:
+      the PR base sha, the push "before" sha, or HEAD~1.
+    required: false
+    default: ""
+  manifest:
+    description: Manifest file to inspect
+    required: false
+    default: mise.toml
+outputs:
+  tools:
+    description: JSON object mapping each tool key to whether it changed
+    value: ${{ steps.detect.outputs.tools }}
+runs:
+  using: composite
+  steps:
+    - id: detect
+      shell: bash
+      env:
+        BASE_REF: ${{ inputs.base-ref }}
+        MANIFEST: ${{ inputs.manifest }}
+        EVENT_NAME: ${{ github.event_name }}
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        PUSH_BEFORE_SHA: ${{ github.event.before }}
+      run: |
+        if [ -n "$BASE_REF" ]; then
+          base="$BASE_REF"
+        elif [ "$EVENT_NAME" = "pull_request" ]; then
+          base="$PR_BASE_SHA"
+        elif [ -n "$PUSH_BEFORE_SHA" ] && [ "$PUSH_BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+          base="$PUSH_BEFORE_SHA"
+        else
+          base="HEAD~1"
+        fi
+        echo "tools=$(python3 "$GITHUB_ACTION_PATH/tool_bumps.py" "$base" "$MANIFEST")" >> "$GITHUB_OUTPUT"

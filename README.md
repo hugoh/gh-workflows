@@ -10,6 +10,10 @@ can insert them in the right place.
 - **`setup`** — checks out the repo and sets up mise
 - **`hk-check`** — runs `hk check --no-progress --profile ci --all`, dumping
   the log on failure
+- **`tool-bumps`** — emits a `tools` output: a JSON map of which `mise.toml`
+  `[tools]` entries changed since a base ref, for gating downstream jobs on a
+  specific tool's version bump. Needs the repo checked out with full history
+  (`fetch-depth: 0`).
 
 ## Usage
 
@@ -33,6 +37,22 @@ steps:
   - uses: hugoh/gh-workflows/setup@<pinned-sha>
   - run: npm ci && npm run build
   - uses: hugoh/gh-workflows/hk-check@<pinned-sha>
+```
+
+Gating a job on a tool bump:
+
+```yaml
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      copier: ${{ fromJSON(steps.bumps.outputs.tools).copier == true }}
+    steps:
+      - uses: hugoh/gh-workflows/setup@<pinned-sha>
+        with:
+          fetch-depth: 0
+      - uses: hugoh/gh-workflows/tool-bumps@<pinned-sha>
+        id: bumps
 ```
 
 ## Why two actions instead of one reusable workflow
