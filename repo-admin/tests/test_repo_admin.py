@@ -564,8 +564,20 @@ def _check_runs_response(runs):
     return {"check_runs": runs}
 
 
-def _run(name, conclusion, app_slug="github-actions"):
-    return {"name": name, "conclusion": conclusion, "app": {"slug": app_slug}}
+def _run(name, conclusion, app_slug="github-actions", suite=1):
+    return {
+        "name": name,
+        "conclusion": conclusion,
+        "app": {"slug": app_slug},
+        "check_suite": {"id": suite},
+    }
+
+
+def _patch_own_suites(monkeypatch, suite_ids):
+    async def fake(owner, name, sha):
+        return set(suite_ids)
+
+    monkeypatch.setattr(repo_admin, "_own_workflow_check_suite_ids", fake)
 
 
 async def test_check_run_contexts_excludes_third_party_apps(monkeypatch):
@@ -578,9 +590,56 @@ async def test_check_run_contexts_excludes_third_party_apps(monkeypatch):
         )
 
     monkeypatch.setattr(repo_admin, "api_json", fake_api_json)
+    _patch_own_suites(monkeypatch, [1])
     assert await repo_admin._check_run_contexts("hugoh", "repo", ["sha"]) == [
         "goci / goci"
     ]
+
+
+async def test_check_run_contexts_excludes_github_managed_setup_checks(monkeypatch):
+    async def fake_api_json(method, path, **kwargs):
+        if path.endswith("/check-runs"):
+            return _check_runs_response(
+                [
+                    _run("lint", "success", suite=10),
+                    _run("Analyze (python)", "success", suite=20),
+                    _run("Analyze (actions)", "success", suite=20),
+                    _run("github-advanced-security", "failure", suite=30),
+                ]
+            )
+        if path.endswith("/actions/runs"):
+            return {
+                "workflow_runs": [
+                    {"check_suite_id": 10, "path": ".github/workflows/hk.yml"},
+                    {
+                        "check_suite_id": 20,
+                        "path": "dynamic/github-code-scanning/codeql",
+                    },
+                    {
+                        "check_suite_id": 30,
+                        "path": "dynamic/agents/github-advanced-security",
+                    },
+                ]
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(repo_admin, "api_json", fake_api_json)
+    assert await repo_admin._check_run_contexts("hugoh", "repo", ["sha"]) == ["lint"]
+
+
+async def test_own_workflow_check_suite_ids_keeps_only_repo_workflow_paths(monkeypatch):
+    async def fake_api_json(method, path, **kwargs):
+        return {
+            "workflow_runs": [
+                {"check_suite_id": 10, "path": ".github/workflows/hk.yml"},
+                {"check_suite_id": 20, "path": "dynamic/github-code-scanning/codeql"},
+            ]
+        }
+
+    monkeypatch.setattr(repo_admin, "api_json", fake_api_json)
+    assert await repo_admin._own_workflow_check_suite_ids("hugoh", "repo", "sha") == {
+        10
+    }
 
 
 async def test_check_run_contexts_replaces_skip_artifact_with_composite_alias(
@@ -600,6 +659,7 @@ async def test_check_run_contexts_replaces_skip_artifact_with_composite_alias(
         return responses[sha]
 
     monkeypatch.setattr(repo_admin, "api_json", fake_api_json)
+    _patch_own_suites(monkeypatch, [1])
     contexts = await repo_admin._check_run_contexts("hugoh", "repo", ["sha1", "sha2"])
     assert contexts == ["hk / hk", "release / release"]
 
@@ -615,6 +675,7 @@ async def test_check_run_contexts_keeps_legitimately_skipped_check(monkeypatch):
         return responses["sha1"]
 
     monkeypatch.setattr(repo_admin, "api_json", fake_api_json)
+    _patch_own_suites(monkeypatch, [1])
     contexts = await repo_admin._check_run_contexts("hugoh", "repo", ["sha1"])
     assert contexts == ["hk / hk", "pages"]
 
@@ -785,6 +846,21 @@ async def test_branch_protection_worker_dry_run_unchanged_line(monkeypatch):
     result = await worker(REPO)
     assert result.status == Status.UNCHANGED
     assert result.line == f"{'repo':<30} unchanged: build, test"
+
+
+async def test_branch_protection_worker_dry_run_shows_old_contexts(monkeypatch):
+    worker = _branch_protection_worker(
+        monkeypatch,
+        dry_run=True,
+        shas=["sha"],
+        contexts=["build", "test"],
+        current=_protection_state(contexts=["build"]),
+    )
+    result = await worker(REPO)
+    assert result.status == Status.OK
+    assert result.line == (
+        f"{'repo':<30} would update -> require: build, test (was: build)"
+    )
 
 
 async def test_branch_protection_worker_apply_unchanged_when_already_protected(
