@@ -21,6 +21,11 @@ local linters = new Mapping<String, Step> {
     ["ty"] {
         depends = List("uv-sync")
     }
+    ["tool-bumps-tests"] = {
+        dir = "tool-bumps"
+        check = "uv run --no-project --python 3.12 python -m unittest discover -p 'test_*.py'"
+        profiles = List("ci")
+    }
 }
 
 hooks {
