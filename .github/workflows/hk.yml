@@ -30,6 +30,3 @@ jobs:
         env:
           PINACT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: hk check --no-progress --profile ci --all
-      - name: Display hk log on failure
-        if: failure()
-        run: cat /home/runner/.local/state/hk/output.log
