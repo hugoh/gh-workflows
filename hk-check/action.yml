@@ -1,12 +1,8 @@
 name: hk-check
-description: Run hk check --all and dump the log on failure
+description: Run hk check --all
 runs:
   using: composite
   steps:
     - name: hk checks
       shell: bash
       run: hk check --no-progress --profile ci --all --no-fail-fast
-    - name: Display hk log on failure
-      if: failure()
-      shell: bash
-      run: cat /home/runner/.local/state/hk/output.log
