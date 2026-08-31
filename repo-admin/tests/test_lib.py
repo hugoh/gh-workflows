@@ -101,6 +101,25 @@ def test_filter_repos_fields():
     ]
 
 
+def test_filter_repos_reads_homepage():
+    repos_json = [
+        {
+            "name": "site-repo",
+            "fork": False,
+            "archived": False,
+            "private": False,
+            "default_branch": "main",
+            "homepage": "https://example.com",
+        }
+    ]
+    assert filter_repos(repos_json)[0].homepage == "https://example.com"
+
+
+def test_filter_repos_homepage_defaults_to_empty_when_null():
+    repos = filter_repos(REPOS_JSON, only={"public-repo"})
+    assert repos[0].homepage == ""
+
+
 def test_filter_repos_handles_null_default_branch():
     repos = filter_repos(REPOS_JSON, only={"empty-repo"})
     assert repos[0].default_branch == ""

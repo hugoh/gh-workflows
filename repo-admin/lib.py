@@ -194,6 +194,7 @@ class Repo:
     default_branch: str
     is_private: bool
     is_fork: bool
+    homepage: str = ""
 
 
 @dataclass
@@ -445,6 +446,7 @@ def filter_repos(
                 default_branch=entry.get("default_branch") or "",
                 is_private=entry["private"],
                 is_fork=entry["fork"],
+                homepage=entry.get("homepage") or "",
             )
         )
     return repos
