@@ -227,6 +227,56 @@ def test_classify_status_not_at_target_and_unchanged_is_limited_unchanged():
     assert classify_status(at_target=False, changed=False) == Status.LIMITED_UNCHANGED
 
 
+def test_partition_fields_splits_would_enable_and_unavailable():
+    summary = lib.partition_fields(
+        {
+            "a": (False, True),
+            "b": (True, True),
+            "c": (False, False),
+        }
+    )
+    assert summary == {"would_enable": ["a"], "unavailable": ["c"]}
+
+
+def test_partition_fields_preserves_field_order():
+    summary = lib.partition_fields(
+        {"z": (False, True), "a": (False, True), "m": (False, True)}
+    )
+    assert summary["would_enable"] == ["z", "a", "m"]
+
+
+def test_summary_status_ok_when_would_enable_and_nothing_gated():
+    assert lib.summary_status({"would_enable": ["a"], "unavailable": []}) == Status.OK
+
+
+def test_summary_status_limited_when_gated_and_would_enable():
+    assert (
+        lib.summary_status({"would_enable": ["a"], "unavailable": ["b"]})
+        == Status.LIMITED
+    )
+
+
+def test_summary_status_limited_unchanged_when_only_gated():
+    assert (
+        lib.summary_status({"would_enable": [], "unavailable": ["b"]})
+        == Status.LIMITED_UNCHANGED
+    )
+
+
+def test_summary_status_unchanged_when_nothing_to_do():
+    assert (
+        lib.summary_status({"would_enable": [], "unavailable": []}) == Status.UNCHANGED
+    )
+
+
+def test_unavailable_suffix_empty_when_nothing_gated():
+    assert lib.unavailable_suffix([]) == ""
+
+
+def test_unavailable_suffix_lists_names():
+    assert lib.unavailable_suffix(["a", "b"]) == " (unavailable: a, b)"
+
+
 def test_status_display_pairs_are_unique_per_status():
     # (symbol, color) pairs -- not symbols alone, since e.g. UNCHANGED and
     # LIMITED_UNCHANGED intentionally share the "•" symbol and differ only

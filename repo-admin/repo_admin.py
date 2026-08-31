@@ -67,8 +67,11 @@ from lib import (
     default_branch_protection_exclude,
     error_message,
     list_repos,
+    partition_fields,
     result_line,
     run_parallel,
+    summary_status,
+    unavailable_suffix,
 )
 from rich.table import Table
 
@@ -156,18 +159,12 @@ def merge_settings_at_target(settings: dict) -> bool:
 
 def merge_settings_summarize(current: dict, *, is_private: bool = False) -> dict:
     gated = set(_merge_gated_fields(is_private=is_private))
-    return {
-        "would_enable": [
-            field
+    return partition_fields(
+        {
+            field: (bool(current[field]), field not in gated)
             for field in MERGE_SETTINGS_FIELDS
-            if field not in gated and not current[field]
-        ],
-        "unavailable": [
-            field
-            for field in MERGE_SETTINGS_FIELDS
-            if field in gated and not current[field]
-        ],
-    }
+        }
+    )
 
 
 def merge_settings_dry_run_line(
@@ -178,9 +175,7 @@ def merge_settings_dry_run_line(
     detail = (
         str(current) if not would_enable else f"would enable: {', '.join(would_enable)}"
     )
-    if unavailable:
-        detail += f" (unavailable: {', '.join(unavailable)})"
-    return result_line(name, detail, status)
+    return result_line(name, detail + unavailable_suffix(unavailable), status)
 
 
 def merge_settings_apply_line(
@@ -195,14 +190,7 @@ def make_merge_settings_worker(owner: str, dry_run: bool):
         if dry_run:
             current = await _merge_settings(owner, repo.name)
             summary = merge_settings_summarize(current, is_private=repo.is_private)
-            if summary["would_enable"]:
-                status = Status.LIMITED if summary["unavailable"] else Status.OK
-            else:
-                status = (
-                    Status.LIMITED_UNCHANGED
-                    if summary["unavailable"]
-                    else Status.UNCHANGED
-                )
+            status = summary_status(summary)
             return RepoResult(
                 repo,
                 merge_settings_dry_run_line(
@@ -287,16 +275,7 @@ def security_summarize(
             codeql_json is not None,
         ),
     }
-    return {
-        "would_enable": [
-            key
-            for key, (current, available) in features.items()
-            if available and not current
-        ],
-        "unavailable": [
-            key for key, (_current, available) in features.items() if not available
-        ],
-    }
+    return partition_fields(features)
 
 
 def security_dry_run_line(name: str, summary: dict, status: Status) -> str:
@@ -304,9 +283,7 @@ def security_dry_run_line(name: str, summary: dict, status: Status) -> str:
     detail = (
         "enabled" if not would_enable else f"would enable: {', '.join(would_enable)}"
     )
-    if unavailable:
-        detail += f" (unavailable: {', '.join(unavailable)})"
-    return result_line(name, detail, status)
+    return result_line(name, detail + unavailable_suffix(unavailable), status)
 
 
 async def _fetch_security_state(
@@ -363,10 +340,7 @@ def make_security_features_worker(owner: str, dry_run: bool):
         )
 
         if dry_run:
-            status = classify_status(
-                at_target=not before_summary["unavailable"],
-                changed=bool(before_summary["would_enable"]),
-            )
+            status = summary_status(before_summary)
             return RepoResult(
                 repo, security_dry_run_line(repo.name, before_summary, status), status
             )
@@ -424,9 +398,8 @@ def make_security_features_worker(owner: str, dry_run: bool):
         status = classify_status(
             at_target=not unavailable, changed=bool(before_summary["would_enable"])
         )
-        detail = "enabled"
+        detail = "enabled" + unavailable_suffix(unavailable)
         if unavailable:
-            detail += f" (unavailable: {', '.join(unavailable)})"
             return RepoResult(
                 repo,
                 result_line(repo.name, detail, status),

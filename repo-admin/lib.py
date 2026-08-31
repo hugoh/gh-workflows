@@ -70,6 +70,36 @@ def classify_status(at_target: bool, changed: bool) -> Status:
     return Status.LIMITED if changed else Status.LIMITED_UNCHANGED
 
 
+def partition_fields(fields: dict[str, tuple[bool, bool]]) -> dict[str, list[str]]:
+    """Splits a `name -> (currently_enabled, available_on_this_plan)` mapping
+    into the two lists every "enable a set of toggles" command reports:
+    `would_enable` (available but off) and `unavailable` (plan-gated).
+    """
+    return {
+        "would_enable": [
+            name
+            for name, (enabled, available) in fields.items()
+            if available and not enabled
+        ],
+        "unavailable": [
+            name for name, (_enabled, available) in fields.items() if not available
+        ],
+    }
+
+
+def summary_status(summary: dict[str, list[str]]) -> Status:
+    """Status for a partition_fields() summary: at target once nothing is
+    plan-gated, changed when there's anything left to enable.
+    """
+    return classify_status(
+        at_target=not summary["unavailable"], changed=bool(summary["would_enable"])
+    )
+
+
+def unavailable_suffix(unavailable: list[str]) -> str:
+    return f" (unavailable: {', '.join(unavailable)})" if unavailable else ""
+
+
 def result_line(name: str, detail: str, status: Status) -> str:
     prefix = (
         "unchanged: " if status in (Status.UNCHANGED, Status.LIMITED_UNCHANGED) else ""
