@@ -119,15 +119,17 @@ uv run repo_admin.py <resource> <verb> [repo ...] \
 - **`pages sync [--dry-run]`** — sets each repo's GitHub Pages custom
   domain from the repo → domain mapping in `config/pages-domains.yaml` (the
   same file `iac/cloudflare`'s OpenTofu config reads to generate the
-  matching DNS records). Only repos listed in the mapping are touched —
+  matching DNS records), and points the repo's homepage URL at
+  `https://<domain>` so the "website" link tracks the custom domain. Only
+  repos listed in the mapping are touched —
   trailing repo names narrow that set further rather than expanding it, and
   error if given a repo not in the mapping. `https_enforced` is only ever
   turned on, and only once GitHub reports the domain's certificate as
   issued; a freshly-set domain needs a later rerun to pick that up once
   DNS/cert issuance catches up.
 - **`pages status`** — read-only: lists every repo with GitHub Pages enabled
-  and its current custom domain/HTTPS state, flagging any that aren't yet in
-  `config/pages-domains.yaml`.
+  and its current custom domain/HTTPS state and homepage URL, flagging any
+  that aren't yet in `config/pages-domains.yaml`.
 - **`pages config --domain <domain>`** — prints
   `config/pages-domains.yaml`-formatted entries to stdout: `<repo>.<domain>`
   per repo, dots in the repo name replaced with dashes (e.g.

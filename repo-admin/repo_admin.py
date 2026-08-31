@@ -15,8 +15,9 @@ Usage: repo_admin.py <resource> <verb> [repo ...] [--dry-run] [--verbose] [--ski
   pages    status               list repos with GitHub Pages enabled and
                                  their custom domain, flagging ones missing
                                  from config/pages-domains.yaml
-  pages    sync                 set each repo's GitHub Pages custom domain,
-                                 from the mapping in config/pages-domains.yaml
+  pages    sync                 set each repo's GitHub Pages custom domain
+                                 and homepage URL, from the mapping in
+                                 config/pages-domains.yaml
   pages    config --domain D    print config/pages-domains.yaml entries to
                                  stdout for a base domain, for the given
                                  repos or, if none given, repos `pages
@@ -758,7 +759,8 @@ async def cmd_protection_sync(args: argparse.Namespace) -> int:
 # -- the single source of truth also read by iac/cloudflare's OpenTofu
 # config to generate the matching CNAME/verification DNS records. Unlike the other
 # commands, this doesn't apply the same setting account-wide: only repos
-# listed in the mapping are touched.
+# listed in the mapping are touched. The repo's homepage URL is also pointed
+# at https://<domain> so the "website" link tracks the custom domain.
 #
 # https_enforced is only ever turned on, never off, and only once GitHub
 # reports the domain's certificate as "approved" -- that requires the CNAME
@@ -781,8 +783,16 @@ def pages_domain_up_to_date(pages_json: dict, domain: str) -> bool:
     )
 
 
+def pages_homepage_url(domain: str) -> str:
+    return f"https://{domain}"
+
+
 def pages_domain_dry_run_line(
-    name: str, pages_json: dict, domain: str, status: Status
+    name: str,
+    pages_json: dict,
+    domain: str,
+    status: Status,
+    homepage_ok: bool = True,
 ) -> str:
     cname_ok = pages_json.get("cname") == domain
     https_ok = pages_json.get("https_enforced") is True
@@ -794,15 +804,22 @@ def pages_domain_dry_run_line(
         detail = f"cname={domain}; would enable https_enforced"
     else:
         detail = f"cname={domain}; https cert pending"
+    if not homepage_ok:
+        detail += f"; would set homepage -> {pages_homepage_url(domain)}"
     return result_line(name, detail, status)
 
 
 def pages_domain_apply_line(
-    name: str, before: dict, after: dict, domain: str, status: Status
+    name: str,
+    before: dict,
+    after: dict,
+    domain: str,
+    status: Status,
+    homepage_changed: bool = False,
 ) -> str:
     cname_changed = before.get("cname") != after.get("cname")
     https_changed = before.get("https_enforced") != after.get("https_enforced")
-    if not cname_changed and not https_changed:
+    if not cname_changed and not https_changed and not homepage_changed:
         detail = (
             f"cname={domain}, https enforced"
             if after.get("https_enforced")
@@ -814,26 +831,36 @@ def pages_domain_apply_line(
         parts.append(f"cname -> {domain}")
     if https_changed:
         parts.append("https_enforced -> true")
+    if homepage_changed:
+        parts.append(f"homepage -> {pages_homepage_url(domain)}")
     return result_line(name, ", ".join(parts), status)
 
 
 def make_pages_domain_worker(owner: str, dry_run: bool, domains: dict[str, str]):
     async def worker(repo: Repo) -> RepoResult:
         domain = domains[repo.name]
+        homepage_ok = repo.homepage == pages_homepage_url(domain)
         current = await _pages_config(owner, repo.name)
 
         if dry_run:
             cname_ok = current.get("cname") == domain
-            would_change = not cname_ok or (
-                pages_domain_https_ready(current)
-                and current.get("https_enforced") is not True
+            would_change = (
+                not cname_ok
+                or not homepage_ok
+                or (
+                    pages_domain_https_ready(current)
+                    and current.get("https_enforced") is not True
+                )
             )
             status = classify_status(
-                at_target=pages_domain_up_to_date(current, domain), changed=would_change
+                at_target=pages_domain_up_to_date(current, domain) and homepage_ok,
+                changed=would_change,
             )
             return RepoResult(
                 repo,
-                pages_domain_dry_run_line(repo.name, current, domain, status),
+                pages_domain_dry_run_line(
+                    repo.name, current, domain, status, homepage_ok
+                ),
                 status,
             )
 
@@ -853,12 +880,27 @@ def make_pages_domain_worker(owner: str, dry_run: bool, domains: dict[str, str])
         else:
             after = before
 
+        if not homepage_ok:
+            await api_json(
+                "PATCH",
+                f"/repos/{owner}/{repo.name}",
+                json={"homepage": pages_homepage_url(domain)},
+            )
+
         status = classify_status(
-            at_target=pages_domain_up_to_date(after, domain), changed=before != after
+            at_target=pages_domain_up_to_date(after, domain),
+            changed=before != after or not homepage_ok,
         )
         return RepoResult(
             repo,
-            pages_domain_apply_line(repo.name, before, after, domain, status),
+            pages_domain_apply_line(
+                repo.name,
+                before,
+                after,
+                domain,
+                status,
+                homepage_changed=not homepage_ok,
+            ),
             status,
         )
 
@@ -946,6 +988,7 @@ async def cmd_pages_status(args: argparse.Namespace) -> int:
     table.add_column("URL", overflow="fold")
     table.add_column("HTTPS")
     table.add_column("MAPPED")
+    table.add_column("HOMEPAGE", overflow="fold")
     for repo, config in enabled:
         https = (
             "enforced"
@@ -957,6 +1000,7 @@ async def cmd_pages_status(args: argparse.Namespace) -> int:
             config.get("html_url") or "(unknown)",
             https,
             "yes" if repo.name in domains else "no",
+            repo.homepage or "(none)",
         )
     lib.console.print(table)
 

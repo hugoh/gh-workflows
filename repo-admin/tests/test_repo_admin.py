@@ -1018,6 +1018,14 @@ def test_sync_subcommand_is_registered_in_parser():
 
 DOMAIN = "awesome-jj.larve.net"
 
+PAGES_REPO = Repo(
+    name="repo",
+    default_branch="main",
+    is_private=False,
+    is_fork=False,
+    homepage=f"https://{DOMAIN}",
+)
+
 
 def test_pages_domain_up_to_date_true_when_cname_and_https_match():
     assert repo_admin.pages_domain_up_to_date(
@@ -1127,7 +1135,7 @@ async def test_pages_domain_worker_dry_run_unchanged(monkeypatch):
     worker = repo_admin.make_pages_domain_worker(
         owner="hugoh", dry_run=True, domains={"repo": DOMAIN}
     )
-    result = await worker(REPO)
+    result = await worker(PAGES_REPO)
     assert result.status == Status.UNCHANGED
 
 
@@ -1158,8 +1166,35 @@ async def test_pages_domain_worker_dry_run_limited_unchanged_when_cert_pending(
     worker = repo_admin.make_pages_domain_worker(
         owner="hugoh", dry_run=True, domains={"repo": DOMAIN}
     )
-    result = await worker(REPO)
+    result = await worker(PAGES_REPO)
     assert result.status == Status.LIMITED_UNCHANGED
+
+
+async def test_pages_domain_worker_dry_run_flags_homepage_mismatch(monkeypatch):
+    async def fake_pages_config(owner, name):
+        return {"cname": DOMAIN, "https_enforced": True}
+
+    monkeypatch.setattr(repo_admin, "_pages_config", fake_pages_config)
+    worker = repo_admin.make_pages_domain_worker(
+        owner="hugoh", dry_run=True, domains={"repo": DOMAIN}
+    )
+    result = await worker(REPO)
+    assert result.status == Status.LIMITED
+    assert f"would set homepage -> https://{DOMAIN}" in result.line
+
+
+async def test_pages_domain_worker_apply_sets_homepage(monkeypatch):
+    worker, calls = _pages_domain_apply_worker(
+        monkeypatch,
+        [
+            {"cname": DOMAIN, "https_enforced": True},
+            {"cname": DOMAIN, "https_enforced": True},
+        ],
+    )
+    result = await worker(REPO)
+    assert result.status == Status.OK
+    assert calls == [("PATCH", "/repos/hugoh/repo", {"homepage": f"https://{DOMAIN}"})]
+    assert f"homepage -> https://{DOMAIN}" in result.line
 
 
 def _pages_domain_apply_worker(monkeypatch, responses):
@@ -1189,7 +1224,7 @@ async def test_pages_domain_worker_apply_sets_cname(monkeypatch):
             {"cname": DOMAIN, "https_enforced": False},
         ],
     )
-    result = await worker(REPO)
+    result = await worker(PAGES_REPO)
     assert result.status == Status.LIMITED
     assert calls == [("PUT", "/repos/hugoh/repo/pages", {"cname": DOMAIN})]
 
@@ -1206,7 +1241,7 @@ async def test_pages_domain_worker_apply_enables_https_when_cert_ready(monkeypat
             {"cname": DOMAIN, "https_enforced": True},
         ],
     )
-    result = await worker(REPO)
+    result = await worker(PAGES_REPO)
     assert result.status == Status.OK
     assert calls == [("PUT", "/repos/hugoh/repo/pages", {"https_enforced": True})]
 
@@ -1223,7 +1258,7 @@ async def test_pages_domain_worker_apply_unchanged_when_already_at_target(monkey
     worker = repo_admin.make_pages_domain_worker(
         owner="hugoh", dry_run=False, domains={"repo": DOMAIN}
     )
-    result = await worker(REPO)
+    result = await worker(PAGES_REPO)
     assert result.status == Status.UNCHANGED
 
 
@@ -1264,7 +1299,11 @@ async def test_cmd_pages_status_lists_enabled_repos_and_flags_unmapped(
     monkeypatch, capsys
 ):
     mapped_repo = Repo(
-        name="awesome-jj", default_branch="main", is_private=False, is_fork=False
+        name="awesome-jj",
+        default_branch="main",
+        is_private=False,
+        is_fork=False,
+        homepage=f"https://{DOMAIN}",
     )
     unmapped_repo = Repo(
         name="other-repo", default_branch="main", is_private=False, is_fork=False
@@ -1300,6 +1339,7 @@ async def test_cmd_pages_status_lists_enabled_repos_and_flags_unmapped(
         name = path.split("/")[3]
         return pages_configs[name]
 
+    monkeypatch.setenv("COLUMNS", "200")
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
     monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
     monkeypatch.setattr(
@@ -1316,6 +1356,8 @@ async def test_cmd_pages_status_lists_enabled_repos_and_flags_unmapped(
     assert "https://hugoh.github.io/other-repo/" in out
     assert "not in config/pages-domains.yaml" in out
     assert "other-repo" in out.split("not in config/pages-domains.yaml")[1]
+    assert "HOMEPAGE" in out
+    assert "(none)" in out
 
 
 def test_pages_status_subcommand_is_registered_in_parser():
