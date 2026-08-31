@@ -277,6 +277,50 @@ def test_unavailable_suffix_lists_names():
     assert lib.unavailable_suffix(["a", "b"]) == " (unavailable: a, b)"
 
 
+async def test_run_reconcile_dry_run_reports_plan_without_applying():
+    applied = False
+
+    async def fetch():
+        return "state"
+
+    def plan_result(state):
+        assert state == "state"
+        return "planned"
+
+    async def apply_result(state):
+        nonlocal applied
+        applied = True
+        return "applied"
+
+    result = await lib.run_reconcile(
+        dry_run=True, fetch=fetch, plan_result=plan_result, apply_result=apply_result
+    )
+    assert result == "planned"
+    assert not applied
+
+
+async def test_run_reconcile_applies_with_fetched_state():
+    fetch_calls = 0
+
+    async def fetch():
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return "before"
+
+    def plan_result(state):
+        raise AssertionError("plan_result should not run when not dry_run")
+
+    async def apply_result(state):
+        assert state == "before"
+        return "applied"
+
+    result = await lib.run_reconcile(
+        dry_run=False, fetch=fetch, plan_result=plan_result, apply_result=apply_result
+    )
+    assert result == "applied"
+    assert fetch_calls == 1
+
+
 def test_status_display_pairs_are_unique_per_status():
     # (symbol, color) pairs -- not symbols alone, since e.g. UNCHANGED and
     # LIMITED_UNCHANGED intentionally share the "•" symbol and differ only
