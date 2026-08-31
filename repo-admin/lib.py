@@ -8,9 +8,10 @@ import enum
 import os
 import subprocess
 import sys
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx2
 import yaml
@@ -68,6 +69,57 @@ def classify_status(at_target: bool, changed: bool) -> Status:
     if at_target:
         return Status.OK if changed else Status.UNCHANGED
     return Status.LIMITED if changed else Status.LIMITED_UNCHANGED
+
+
+def partition_fields(fields: dict[str, tuple[bool, bool]]) -> dict[str, list[str]]:
+    """Splits a `name -> (currently_enabled, available_on_this_plan)` mapping
+    into the two lists every "enable a set of toggles" command reports:
+    `would_enable` (available but off) and `unavailable` (plan-gated).
+    """
+    return {
+        "would_enable": [
+            name
+            for name, (enabled, available) in fields.items()
+            if available and not enabled
+        ],
+        "unavailable": [
+            name for name, (_enabled, available) in fields.items() if not available
+        ],
+    }
+
+
+def summary_status(summary: dict[str, list[str]]) -> Status:
+    """Status for a partition_fields() summary: at target once nothing is
+    plan-gated, changed when there's anything left to enable.
+    """
+    return classify_status(
+        at_target=not summary["unavailable"], changed=bool(summary["would_enable"])
+    )
+
+
+def unavailable_suffix(unavailable: list[str]) -> str:
+    return f" (unavailable: {', '.join(unavailable)})" if unavailable else ""
+
+
+_State = TypeVar("_State")
+
+
+async def run_reconcile(
+    *,
+    dry_run: bool,
+    fetch: Callable[[], Awaitable[_State]],
+    plan_result: Callable[[_State], RepoResult],
+    apply_result: Callable[[_State], Awaitable[RepoResult]],
+) -> RepoResult:
+    """Fetch-then-branch skeleton shared by the mutating workers: read the
+    repo's current state once, then either report the plan (dry run) or
+    apply the change and report the outcome. Each worker keeps its own
+    planning, API calls, and result formatting in the three callables.
+    """
+    state = await fetch()
+    if dry_run:
+        return plan_result(state)
+    return await apply_result(state)
 
 
 def result_line(name: str, detail: str, status: Status) -> str:

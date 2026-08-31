@@ -227,6 +227,100 @@ def test_classify_status_not_at_target_and_unchanged_is_limited_unchanged():
     assert classify_status(at_target=False, changed=False) == Status.LIMITED_UNCHANGED
 
 
+def test_partition_fields_splits_would_enable_and_unavailable():
+    summary = lib.partition_fields(
+        {
+            "a": (False, True),
+            "b": (True, True),
+            "c": (False, False),
+        }
+    )
+    assert summary == {"would_enable": ["a"], "unavailable": ["c"]}
+
+
+def test_partition_fields_preserves_field_order():
+    summary = lib.partition_fields(
+        {"z": (False, True), "a": (False, True), "m": (False, True)}
+    )
+    assert summary["would_enable"] == ["z", "a", "m"]
+
+
+def test_summary_status_ok_when_would_enable_and_nothing_gated():
+    assert lib.summary_status({"would_enable": ["a"], "unavailable": []}) == Status.OK
+
+
+def test_summary_status_limited_when_gated_and_would_enable():
+    assert (
+        lib.summary_status({"would_enable": ["a"], "unavailable": ["b"]})
+        == Status.LIMITED
+    )
+
+
+def test_summary_status_limited_unchanged_when_only_gated():
+    assert (
+        lib.summary_status({"would_enable": [], "unavailable": ["b"]})
+        == Status.LIMITED_UNCHANGED
+    )
+
+
+def test_summary_status_unchanged_when_nothing_to_do():
+    assert (
+        lib.summary_status({"would_enable": [], "unavailable": []}) == Status.UNCHANGED
+    )
+
+
+def test_unavailable_suffix_empty_when_nothing_gated():
+    assert lib.unavailable_suffix([]) == ""
+
+
+def test_unavailable_suffix_lists_names():
+    assert lib.unavailable_suffix(["a", "b"]) == " (unavailable: a, b)"
+
+
+async def test_run_reconcile_dry_run_reports_plan_without_applying():
+    applied = False
+
+    async def fetch():
+        return "state"
+
+    def plan_result(state):
+        assert state == "state"
+        return "planned"
+
+    async def apply_result(state):
+        nonlocal applied
+        applied = True
+        return "applied"
+
+    result = await lib.run_reconcile(
+        dry_run=True, fetch=fetch, plan_result=plan_result, apply_result=apply_result
+    )
+    assert result == "planned"
+    assert not applied
+
+
+async def test_run_reconcile_applies_with_fetched_state():
+    fetch_calls = 0
+
+    async def fetch():
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return "before"
+
+    def plan_result(state):
+        raise AssertionError("plan_result should not run when not dry_run")
+
+    async def apply_result(state):
+        assert state == "before"
+        return "applied"
+
+    result = await lib.run_reconcile(
+        dry_run=False, fetch=fetch, plan_result=plan_result, apply_result=apply_result
+    )
+    assert result == "applied"
+    assert fetch_calls == 1
+
+
 def test_status_display_pairs_are_unique_per_status():
     # (symbol, color) pairs -- not symbols alone, since e.g. UNCHANGED and
     # LIMITED_UNCHANGED intentionally share the "•" symbol and differ only

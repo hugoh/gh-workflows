@@ -67,8 +67,12 @@ from lib import (
     default_branch_protection_exclude,
     error_message,
     list_repos,
+    partition_fields,
     result_line,
     run_parallel,
+    run_reconcile,
+    summary_status,
+    unavailable_suffix,
 )
 from rich.table import Table
 
@@ -156,18 +160,12 @@ def merge_settings_at_target(settings: dict) -> bool:
 
 def merge_settings_summarize(current: dict, *, is_private: bool = False) -> dict:
     gated = set(_merge_gated_fields(is_private=is_private))
-    return {
-        "would_enable": [
-            field
+    return partition_fields(
+        {
+            field: (bool(current[field]), field not in gated)
             for field in MERGE_SETTINGS_FIELDS
-            if field not in gated and not current[field]
-        ],
-        "unavailable": [
-            field
-            for field in MERGE_SETTINGS_FIELDS
-            if field in gated and not current[field]
-        ],
-    }
+        }
+    )
 
 
 def merge_settings_dry_run_line(
@@ -178,9 +176,7 @@ def merge_settings_dry_run_line(
     detail = (
         str(current) if not would_enable else f"would enable: {', '.join(would_enable)}"
     )
-    if unavailable:
-        detail += f" (unavailable: {', '.join(unavailable)})"
-    return result_line(name, detail, status)
+    return result_line(name, detail + unavailable_suffix(unavailable), status)
 
 
 def merge_settings_apply_line(
@@ -192,17 +188,10 @@ def merge_settings_apply_line(
 
 def make_merge_settings_worker(owner: str, dry_run: bool):
     async def worker(repo: Repo) -> RepoResult:
-        if dry_run:
-            current = await _merge_settings(owner, repo.name)
-            summary = merge_settings_summarize(current, is_private=repo.is_private)
-            if summary["would_enable"]:
-                status = Status.LIMITED if summary["unavailable"] else Status.OK
-            else:
-                status = (
-                    Status.LIMITED_UNCHANGED
-                    if summary["unavailable"]
-                    else Status.UNCHANGED
-                )
+        def plan_result(current: dict) -> RepoResult:
+            status = summary_status(
+                merge_settings_summarize(current, is_private=repo.is_private)
+            )
             return RepoResult(
                 repo,
                 merge_settings_dry_run_line(
@@ -211,18 +200,27 @@ def make_merge_settings_worker(owner: str, dry_run: bool):
                 status,
             )
 
-        before = await _merge_settings(owner, repo.name)
-        await api_json(
-            "PATCH",
-            f"/repos/{owner}/{repo.name}",
-            json={field: True for field in MERGE_SETTINGS_FIELDS},
-        )
-        after = await _merge_settings(owner, repo.name)
-        status = classify_status(
-            at_target=merge_settings_at_target(after), changed=before != after
-        )
-        return RepoResult(
-            repo, merge_settings_apply_line(repo.name, before, after, status), status
+        async def apply_result(before: dict) -> RepoResult:
+            await api_json(
+                "PATCH",
+                f"/repos/{owner}/{repo.name}",
+                json={field: True for field in MERGE_SETTINGS_FIELDS},
+            )
+            after = await _merge_settings(owner, repo.name)
+            status = classify_status(
+                at_target=merge_settings_at_target(after), changed=before != after
+            )
+            return RepoResult(
+                repo,
+                merge_settings_apply_line(repo.name, before, after, status),
+                status,
+            )
+
+        return await run_reconcile(
+            dry_run=dry_run,
+            fetch=lambda: _merge_settings(owner, repo.name),
+            plan_result=plan_result,
+            apply_result=apply_result,
         )
 
     return worker
@@ -287,16 +285,7 @@ def security_summarize(
             codeql_json is not None,
         ),
     }
-    return {
-        "would_enable": [
-            key
-            for key, (current, available) in features.items()
-            if available and not current
-        ],
-        "unavailable": [
-            key for key, (_current, available) in features.items() if not available
-        ],
-    }
+    return partition_fields(features)
 
 
 def security_dry_run_line(name: str, summary: dict, status: Status) -> str:
@@ -304,9 +293,7 @@ def security_dry_run_line(name: str, summary: dict, status: Status) -> str:
     detail = (
         "enabled" if not would_enable else f"would enable: {', '.join(would_enable)}"
     )
-    if unavailable:
-        detail += f" (unavailable: {', '.join(unavailable)})"
-    return result_line(name, detail, status)
+    return result_line(name, detail + unavailable_suffix(unavailable), status)
 
 
 async def _fetch_security_state(
@@ -349,91 +336,94 @@ async def _fetch_security_state(
 
 def make_security_features_worker(owner: str, dry_run: bool):
     async def worker(repo: Repo) -> RepoResult:
-        (
-            repo_json,
-            vuln_alerts_enabled,
-            pvr_json,
-            codeql_json,
-        ) = await _fetch_security_state(owner, repo.name)
-        before_summary = security_summarize(
-            repo_json,
-            vuln_alerts_enabled=vuln_alerts_enabled,
-            pvr_json=pvr_json,
-            codeql_json=codeql_json,
-        )
-
-        if dry_run:
-            status = classify_status(
-                at_target=not before_summary["unavailable"],
-                changed=bool(before_summary["would_enable"]),
+        async def fetch() -> dict:
+            (
+                repo_json,
+                vuln_alerts_enabled,
+                pvr_json,
+                codeql_json,
+            ) = await _fetch_security_state(owner, repo.name)
+            return security_summarize(
+                repo_json,
+                vuln_alerts_enabled=vuln_alerts_enabled,
+                pvr_json=pvr_json,
+                codeql_json=codeql_json,
             )
+
+        def plan_result(before_summary: dict) -> RepoResult:
+            status = summary_status(before_summary)
             return RepoResult(
                 repo, security_dry_run_line(repo.name, before_summary, status), status
             )
 
-        await api_json("PUT", f"/repos/{owner}/{repo.name}/vulnerability-alerts")
+        async def apply_result(before_summary: dict) -> RepoResult:
+            await api_json("PUT", f"/repos/{owner}/{repo.name}/vulnerability-alerts")
 
-        unavailable = []
+            unavailable = []
 
-        # 422 = one or more of these fields isn't available on this plan
-        # (GitHub Advanced Security is required for private repos).
-        security_response = await api_request(
-            "PATCH",
-            f"/repos/{owner}/{repo.name}",
-            json={
-                "security_and_analysis": {
-                    "secret_scanning": {"status": "enabled"},
-                    "secret_scanning_push_protection": {"status": "enabled"},
-                    "dependabot_security_updates": {"status": "enabled"},
-                }
-            },
-        )
-        if security_response.status_code == 422:
-            unavailable.append("secret scanning")
-        elif not security_response.is_success:
-            raise GhError(
-                error_message(security_response),
-                status_code=security_response.status_code,
+            # 422 = one or more of these fields isn't available on this plan
+            # (GitHub Advanced Security is required for private repos).
+            security_response = await api_request(
+                "PATCH",
+                f"/repos/{owner}/{repo.name}",
+                json={
+                    "security_and_analysis": {
+                        "secret_scanning": {"status": "enabled"},
+                        "secret_scanning_push_protection": {"status": "enabled"},
+                        "dependabot_security_updates": {"status": "enabled"},
+                    }
+                },
             )
+            if security_response.status_code == 422:
+                unavailable.append("secret scanning")
+            elif not security_response.is_success:
+                raise GhError(
+                    error_message(security_response),
+                    status_code=security_response.status_code,
+                )
 
-        # 404 = not available on this plan.
-        pvr_response = await api_request(
-            "PUT", f"/repos/{owner}/{repo.name}/private-vulnerability-reporting"
-        )
-        if pvr_response.status_code == 404:
-            unavailable.append("private vulnerability reporting")
-        elif not pvr_response.is_success:
-            raise GhError(
-                error_message(pvr_response), status_code=pvr_response.status_code
+            # 404 = not available on this plan.
+            pvr_response = await api_request(
+                "PUT", f"/repos/{owner}/{repo.name}/private-vulnerability-reporting"
             )
+            if pvr_response.status_code == 404:
+                unavailable.append("private vulnerability reporting")
+            elif not pvr_response.is_success:
+                raise GhError(
+                    error_message(pvr_response), status_code=pvr_response.status_code
+                )
 
-        # 403/404 = not available on this plan or repo; 422 = no
-        # CodeQL-supported language detected in the repo.
-        codeql_response = await api_request(
-            "PATCH",
-            f"/repos/{owner}/{repo.name}/code-scanning/default-setup",
-            json={"state": "configured"},
-        )
-        if codeql_response.status_code in (403, 404, 422):
-            unavailable.append("code scanning")
-        elif not codeql_response.is_success:
-            raise GhError(
-                error_message(codeql_response), status_code=codeql_response.status_code
+            # 403/404 = not available on this plan or repo; 422 = no
+            # CodeQL-supported language detected in the repo.
+            codeql_response = await api_request(
+                "PATCH",
+                f"/repos/{owner}/{repo.name}/code-scanning/default-setup",
+                json={"state": "configured"},
             )
+            if codeql_response.status_code in (403, 404, 422):
+                unavailable.append("code scanning")
+            elif not codeql_response.is_success:
+                raise GhError(
+                    error_message(codeql_response),
+                    status_code=codeql_response.status_code,
+                )
 
-        status = classify_status(
-            at_target=not unavailable, changed=bool(before_summary["would_enable"])
-        )
-        detail = "enabled"
-        if unavailable:
-            detail += f" (unavailable: {', '.join(unavailable)})"
+            status = classify_status(
+                at_target=not unavailable,
+                changed=bool(before_summary["would_enable"]),
+            )
+            detail = "enabled" + unavailable_suffix(unavailable)
+            tag = Tag.UNAVAILABLE if unavailable else None
             return RepoResult(
-                repo,
-                result_line(repo.name, detail, status),
-                status,
-                tag=Tag.UNAVAILABLE,
+                repo, result_line(repo.name, detail, status), status, tag=tag
             )
-        return RepoResult(repo, result_line(repo.name, detail, status), status)
+
+        return await run_reconcile(
+            dry_run=dry_run,
+            fetch=fetch,
+            plan_result=plan_result,
+            apply_result=apply_result,
+        )
 
     return worker
 
@@ -840,12 +830,10 @@ def make_pages_domain_worker(owner: str, dry_run: bool, domains: dict[str, str])
     async def worker(repo: Repo) -> RepoResult:
         domain = domains[repo.name]
         homepage_ok = repo.homepage == pages_homepage_url(domain)
-        current = await _pages_config(owner, repo.name)
 
-        if dry_run:
-            cname_ok = current.get("cname") == domain
+        def plan_result(current: dict) -> RepoResult:
             would_change = (
-                not cname_ok
+                current.get("cname") != domain
                 or not homepage_ok
                 or (
                     pages_domain_https_ready(current)
@@ -864,44 +852,51 @@ def make_pages_domain_worker(owner: str, dry_run: bool, domains: dict[str, str])
                 status,
             )
 
-        before = current
-        payload: dict = {}
-        if before.get("cname") != domain:
-            payload["cname"] = domain
-        elif (
-            pages_domain_https_ready(before)
-            and before.get("https_enforced") is not True
-        ):
-            payload["https_enforced"] = True
+        async def apply_result(before: dict) -> RepoResult:
+            payload: dict = {}
+            if before.get("cname") != domain:
+                payload["cname"] = domain
+            elif (
+                pages_domain_https_ready(before)
+                and before.get("https_enforced") is not True
+            ):
+                payload["https_enforced"] = True
 
-        if payload:
-            await api_json("PUT", f"/repos/{owner}/{repo.name}/pages", json=payload)
-            after = await _pages_config(owner, repo.name)
-        else:
-            after = before
+            if payload:
+                await api_json("PUT", f"/repos/{owner}/{repo.name}/pages", json=payload)
+                after = await _pages_config(owner, repo.name)
+            else:
+                after = before
 
-        if not homepage_ok:
-            await api_json(
-                "PATCH",
-                f"/repos/{owner}/{repo.name}",
-                json={"homepage": pages_homepage_url(domain)},
+            if not homepage_ok:
+                await api_json(
+                    "PATCH",
+                    f"/repos/{owner}/{repo.name}",
+                    json={"homepage": pages_homepage_url(domain)},
+                )
+
+            status = classify_status(
+                at_target=pages_domain_up_to_date(after, domain),
+                changed=before != after or not homepage_ok,
+            )
+            return RepoResult(
+                repo,
+                pages_domain_apply_line(
+                    repo.name,
+                    before,
+                    after,
+                    domain,
+                    status,
+                    homepage_changed=not homepage_ok,
+                ),
+                status,
             )
 
-        status = classify_status(
-            at_target=pages_domain_up_to_date(after, domain),
-            changed=before != after or not homepage_ok,
-        )
-        return RepoResult(
-            repo,
-            pages_domain_apply_line(
-                repo.name,
-                before,
-                after,
-                domain,
-                status,
-                homepage_changed=not homepage_ok,
-            ),
-            status,
+        return await run_reconcile(
+            dry_run=dry_run,
+            fetch=lambda: _pages_config(owner, repo.name),
+            plan_result=plan_result,
+            apply_result=apply_result,
         )
 
     return worker
