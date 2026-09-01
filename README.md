@@ -14,6 +14,13 @@ can insert them in the right place.
   `[tools]` entries changed since a base ref, for gating downstream jobs on a
   specific tool's version bump. Needs the repo checked out with full history
   (`fetch-depth: 0`).
+- **`mise-latest-versions`** — emits a `matrix` output: a JSON array of the
+  newest N version series of a mise tool, from `mise ls-remote <tool>`, for a
+  version-compatibility test matrix. Inputs: `tool` (required, e.g. `jj`),
+  `level` (`major`/`minor`/`patch`, default `minor`), `count` (default `3`) —
+  e.g. `level: minor` → `["0.42","0.43","0.44"]`, `level: major, count: 2` →
+  `["1","2"]`. Needs `mise` on `PATH` (run `setup` first). `go-tools`'
+  `go-tool-compat.yml` reusable workflow wraps this.
 
 ## Usage
 
@@ -37,6 +44,22 @@ steps:
   - uses: hugoh/gh-workflows/setup@<pinned-sha>
   - run: npm ci && npm run build
   - uses: hugoh/gh-workflows/hk-check@<pinned-sha>
+```
+
+Building a jj-version test matrix:
+
+```yaml
+jobs:
+  versions:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - uses: hugoh/gh-workflows/setup@<pinned-sha>
+      - uses: hugoh/gh-workflows/mise-latest-versions@<pinned-sha>
+        id: pick
+        with:
+          tool: jj
 ```
 
 Gating a job on a tool bump:

@@ -26,6 +26,11 @@ local linters = new Mapping<String, Step> {
         check = "uv run --no-project --python 3.12 python -m unittest discover -p 'test_*.py'"
         profiles = List("ci")
     }
+    ["mise-latest-versions-tests"] = {
+        dir = "mise-latest-versions"
+        check = "uv run --no-project --python 3.12 --with pytest pytest -q"
+        profiles = List("ci")
+    }
 }
 
 hooks {
