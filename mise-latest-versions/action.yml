@@ -1,0 +1,36 @@
+name: mise-latest-versions
+description: >
+  Emit a JSON array of the newest N version series of a mise tool, at
+  major/minor/patch granularity, from `mise ls-remote <tool>`. Requires
+  `mise` on PATH — run jdx/mise-action first.
+inputs:
+  tool:
+    description: mise tool name (e.g. jj, go, terraform)
+    required: true
+  level:
+    description: "series granularity: major, minor, or patch"
+    required: false
+    default: minor
+  count:
+    description: how many of the newest series to emit
+    required: false
+    default: "3"
+outputs:
+  matrix:
+    description: JSON array of version-series strings, ascending
+    value: ${{ steps.pick.outputs.matrix }}
+runs:
+  using: composite
+  steps:
+    - id: pick
+      shell: bash
+      env:
+        TOOL: ${{ inputs.tool }}
+        LEVEL: ${{ inputs.level }}
+        COUNT: ${{ inputs.count }}
+      run: |
+        set -euo pipefail
+        matrix=$(mise ls-remote "$TOOL" \
+          | python3 "$GITHUB_ACTION_PATH/latest_versions.py" "$LEVEL" "$COUNT")
+        echo "picked ${TOOL} (${COUNT} newest ${LEVEL}): $matrix" | tee -a "$GITHUB_STEP_SUMMARY"
+        echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
