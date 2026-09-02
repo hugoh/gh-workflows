@@ -114,7 +114,8 @@ uv run repo_admin.py <resource> <verb> [repo ...] \
   because branch protection requires PR branches to be up to date before
   merging; without auto-update, auto-merge PRs stall needing a manual
   "Update branch" click)
-- **`protection sync [--dry-run]`** — requires status checks to pass and a
+- **`protection sync [--dry-run] [--clear-stale-checks]`** — requires
+  status checks to pass and a
   PR (0 approvals needed, no direct pushes) before merging, matching the
   convention `go-tools`' `mise run gh-repo-setup` already established.
   Required contexts are detected from the most recent pull request's check
@@ -124,7 +125,11 @@ uv run repo_admin.py <resource> <verb> [repo ...] \
   "Analyze (...)", the "github-advanced-security" check) never become merge
   gates. `--dry-run` diffs each repo's current protection against the
   baseline and prints "unchanged: ..." or "would update", rather than just
-  showing what would be required. Private repos on a plan without
+  showing what would be required. A repo that already requires checks but
+  yields none to sample (the latest PR's workflow runs aged out, a stale
+  pre-CI PR bumped to the top by a comment) keeps its existing contexts
+  instead of having the merge gate cleared; `--clear-stale-checks` drops
+  them for a repo that genuinely retired its CI. Private repos on a plan without
   branch-protection access are reported, not failed. Repos listed in
   `config/branch-protection-exclude.txt` (e.g. `homebrew-tap`, which has no
   CI/PR workflow) are always skipped; override per-run with
