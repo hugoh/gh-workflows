@@ -740,6 +740,7 @@ def _branch_protection_worker(
     current=None,
     status_code=200,
     track_calls=False,
+    clear_stale_checks=False,
 ):
     async def fake_shas(owner, name):
         return list(shas)
@@ -767,7 +768,9 @@ def _branch_protection_worker(
     monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", fake_shas)
     monkeypatch.setattr(repo_admin, "_check_run_contexts", fake_contexts)
     monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
-    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=dry_run)
+    worker = repo_admin.make_branch_protection_worker(
+        owner="hugoh", dry_run=dry_run, clear_stale_checks=clear_stale_checks
+    )
     return (worker, calls) if track_calls else worker
 
 
@@ -861,6 +864,53 @@ async def test_branch_protection_worker_dry_run_shows_old_contexts(monkeypatch):
     assert result.line == (
         f"{'repo':<30} would update -> require: build, test (was: build)"
     )
+
+
+async def test_branch_protection_worker_keeps_checks_when_sampling_yields_none(
+    monkeypatch,
+):
+    worker = _branch_protection_worker(
+        monkeypatch,
+        dry_run=True,
+        shas=["eba79c"],
+        contexts=[],
+        current=_protection_state(contexts=["check", "lychee"]),
+    )
+    result = await worker(REPO)
+    assert result.status == Status.LIMITED_UNCHANGED
+    assert "keeping check, lychee" in result.line
+    assert "would update" not in result.line
+
+
+async def test_branch_protection_worker_apply_keeps_stale_checks_without_put(
+    monkeypatch,
+):
+    worker, calls = _branch_protection_worker(
+        monkeypatch,
+        dry_run=False,
+        shas=["eba79c"],
+        contexts=[],
+        current=_protection_state(contexts=["check", "lychee"]),
+        track_calls=True,
+    )
+    result = await worker(REPO)
+    assert result.status == Status.LIMITED_UNCHANGED
+    assert result.tag == repo_admin.Tag.APPLIED
+    assert "PUT" not in calls
+
+
+async def test_branch_protection_worker_clears_stale_checks_when_opted_in(monkeypatch):
+    worker = _branch_protection_worker(
+        monkeypatch,
+        dry_run=True,
+        shas=["eba79c"],
+        contexts=[],
+        current=_protection_state(contexts=["check", "lychee"]),
+        clear_stale_checks=True,
+    )
+    result = await worker(REPO)
+    assert result.status == Status.OK
+    assert "would update -> require: (none yet) (was: check, lychee)" in result.line
 
 
 async def test_branch_protection_worker_apply_unchanged_when_already_protected(

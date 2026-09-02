@@ -468,6 +468,12 @@ async def cmd_security_sync(args: argparse.Namespace) -> int:
 # is fine to require -- GitHub reports that as a passing "skipped" check.)
 # Sampling an actual PR's check runs avoids picking up the former case.
 #
+# When a repo that already requires checks yields none to sample (the latest
+# PR's workflow runs aged out of the API, a stale pre-CI PR got bumped to the
+# top by a comment), its existing contexts are retained rather than the merge
+# gate being cleared; --clear-stale-checks opts into dropping them for a repo
+# that genuinely retired its CI.
+#
 # Only check runs reported by the "github-actions" app are considered:
 # third-party apps (DeepSource, Codecov, etc.) aren't defined by the repo
 # itself, can be reconfigured or removed outside of this tool's control, and
@@ -624,7 +630,9 @@ def _plan_gated_result(repo: Repo, *, tag: Tag | None = None) -> RepoResult:
     return RepoResult(repo, result_line(repo.name, detail, status), status, tag=tag)
 
 
-def make_branch_protection_worker(owner: str, dry_run: bool):
+def make_branch_protection_worker(
+    owner: str, dry_run: bool, clear_stale_checks: bool = False
+):
     async def worker(repo: Repo) -> RepoResult:
         # Contexts to require are derived from a recent PR's check runs when
         # available. Without any (a brand-new repo, or one that's only ever
@@ -632,18 +640,16 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
         # no force-push/deletion, admins enforced -- still applies; it just
         # can't gate on specific status checks yet. A later run picks up
         # contexts once a PR exists to sample them from.
+        #
+        # A repo that already requires checks but yields no sampleable ones
+        # (the latest PR's workflow runs aged out, a stale PR predating CI got
+        # bumped to the top by a comment) keeps its existing contexts rather
+        # than having the merge gate silently cleared; --clear-stale-checks
+        # opts into dropping them for a repo that genuinely retired its CI.
         pr_head_shas = await _recent_pr_head_shas(owner, repo.name)
         contexts: list[str] = []
-        pending_note = None
-        if not pr_head_shas:
-            pending_note = "no pull requests found yet, requiring none for now"
-        else:
+        if pr_head_shas:
             contexts = await _check_run_contexts(owner, repo.name, pr_head_shas)
-            if not contexts:
-                pending_note = (
-                    f"no check runs found on latest PR commit {pr_head_shas[0]}, "
-                    "requiring none for now"
-                )
 
         protection_response = await api_request(
             "GET",
@@ -662,30 +668,58 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
                 error_message(protection_response),
                 status_code=protection_response.status_code,
             )
+        existing = current_protection_contexts(current)
+        stale_retained = False
+        pending_note = None
+        if not pr_head_shas:
+            pending_note = "no pull requests found yet, requiring none for now"
+        elif not contexts and existing and not clear_stale_checks:
+            contexts = existing
+            stale_retained = True
+            pending_note = (
+                f"no check runs found on latest PR commit {pr_head_shas[0]}; "
+                f"keeping {', '.join(existing)} "
+                "(pass --clear-stale-checks to drop them)"
+            )
+        elif not contexts:
+            pending_note = (
+                f"no check runs found on latest PR commit {pr_head_shas[0]}, "
+                "requiring none for now"
+            )
+
         up_to_date = branch_protection_up_to_date(current, contexts)
 
         require_desc = ", ".join(contexts) if contexts else "(none yet)"
         suffix = f"; {pending_note}" if pending_note else ""
         tag = Tag.APPLIED if contexts else Tag.APPLIED_NO_CHECKS
+        ok_status = Status.LIMITED if stale_retained else Status.OK
+        unchanged_status = (
+            Status.LIMITED_UNCHANGED if stale_retained else Status.UNCHANGED
+        )
 
         if dry_run:
             if up_to_date:
-                status = Status.UNCHANGED
                 detail = f"{require_desc}{suffix}"
-                return RepoResult(repo, result_line(repo.name, detail, status), status)
-            status = Status.OK
-            old_contexts = current_protection_contexts(current)
-            was_desc = ", ".join(old_contexts) if old_contexts else "(none yet)"
+                return RepoResult(
+                    repo,
+                    result_line(repo.name, detail, unchanged_status),
+                    unchanged_status,
+                )
+            was_desc = ", ".join(existing) if existing else "(none yet)"
             detail = (
                 f"would update -> require: {require_desc} (was: {was_desc}){suffix}"
             )
-            return RepoResult(repo, result_line(repo.name, detail, status), status)
+            return RepoResult(
+                repo, result_line(repo.name, detail, ok_status), ok_status
+            )
 
         if up_to_date:
-            status = Status.UNCHANGED
             detail = f"{require_desc}{suffix}"
             return RepoResult(
-                repo, result_line(repo.name, detail, status), status, tag=tag
+                repo,
+                result_line(repo.name, detail, unchanged_status),
+                unchanged_status,
+                tag=tag,
             )
 
         payload = branch_protection_payload(contexts)
@@ -701,9 +735,10 @@ def make_branch_protection_worker(owner: str, dry_run: bool):
                 error_message(put_response), status_code=put_response.status_code
             )
 
-        status = Status.OK
         detail = f"protected ({require_desc}){suffix}"
-        return RepoResult(repo, result_line(repo.name, detail, status), status, tag=tag)
+        return RepoResult(
+            repo, result_line(repo.name, detail, ok_status), ok_status, tag=tag
+        )
 
     return worker
 
@@ -714,7 +749,11 @@ async def cmd_protection_sync(args: argparse.Namespace) -> int:
     )
     results = await run_parallel(
         repos,
-        make_branch_protection_worker(DEFAULT_OWNER, args.dry_run),
+        make_branch_protection_worker(
+            DEFAULT_OWNER,
+            args.dry_run,
+            clear_stale_checks=getattr(args, "clear_stale_checks", False),
+        ),
         verbose=args.verbose,
     )
 
@@ -1264,9 +1303,18 @@ def build_parser() -> argparse.ArgumentParser:
     resource_verbs("merge").add_parser("sync", parents=[mutating]).set_defaults(
         func=cmd_merge_sync
     )
-    resource_verbs("protection").add_parser("sync", parents=[mutating]).set_defaults(
-        func=cmd_protection_sync
+    protection_sync = resource_verbs("protection").add_parser(
+        "sync", parents=[mutating]
     )
+    protection_sync.add_argument(
+        "--clear-stale-checks",
+        action="store_true",
+        help=(
+            "drop required status checks for a repo whose recent PRs yield no "
+            "sampleable check runs (default: keep the existing ones)"
+        ),
+    )
+    protection_sync.set_defaults(func=cmd_protection_sync)
     resource_verbs("security").add_parser("sync", parents=[mutating]).set_defaults(
         func=cmd_security_sync
     )
