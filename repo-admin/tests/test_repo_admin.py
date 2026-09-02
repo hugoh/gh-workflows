@@ -680,6 +680,89 @@ async def test_check_run_contexts_keeps_legitimately_skipped_check(monkeypatch):
     assert contexts == ["hk / hk", "pages"]
 
 
+async def test_check_run_contexts_collapses_matrix_legs_when_gate_present(monkeypatch):
+    async def fake_api_json(method, path, **k):
+        return _check_runs_response(
+            [
+                _run("hk / hk", "success"),
+                _run("jj / gate", "success"),
+                _run("jj / versions", "success"),
+                _run("jj / test (0.42)", "success"),
+                _run("jj / test (0.43)", "success"),
+            ]
+        )
+
+    monkeypatch.setattr(repo_admin, "api_json", fake_api_json)
+    _patch_own_suites(monkeypatch, [1])
+    contexts = await repo_admin._check_run_contexts("hugoh", "repo", ["sha1"])
+    assert contexts == ["hk / hk", "jj / gate", "jj / versions"]
+
+
+async def test_check_run_contexts_keeps_matrix_legs_without_gate(monkeypatch):
+    async def fake_api_json(method, path, **k):
+        return _check_runs_response(
+            [
+                _run("test (0.42)", "success"),
+                _run("test (0.43)", "success"),
+            ]
+        )
+
+    monkeypatch.setattr(repo_admin, "api_json", fake_api_json)
+    _patch_own_suites(monkeypatch, [1])
+    contexts = await repo_admin._check_run_contexts("hugoh", "repo", ["sha1"])
+    assert contexts == ["test (0.42)", "test (0.43)"]
+
+
+async def test_check_run_contexts_collapses_local_matrix_with_named_gate(monkeypatch):
+    async def fake_api_json(method, path, **k):
+        return _check_runs_response(
+            [
+                _run("git-gate", "success"),
+                _run("git (ubuntu-24.04)", "success"),
+                _run("git (ubuntu-22.04)", "success"),
+            ]
+        )
+
+    monkeypatch.setattr(repo_admin, "api_json", fake_api_json)
+    _patch_own_suites(monkeypatch, [1])
+    contexts = await repo_admin._check_run_contexts("hugoh", "repo", ["sha1"])
+    assert contexts == ["git-gate"]
+
+
+def test_collapse_matrix_legs_drops_prefixed_legs_covered_by_gate():
+    assert repo_admin._collapse_matrix_legs(
+        {"jj / gate", "jj / test (0.42)", "jj / test (0.43)"}
+    ) == {"jj / gate"}
+
+
+def test_collapse_matrix_legs_handles_nested_reusable_workflow_prefix():
+    assert repo_admin._collapse_matrix_legs(
+        {"compat / jj / gate", "compat / jj / test (0.42)"}
+    ) == {"compat / jj / gate"}
+
+
+def test_collapse_matrix_legs_matches_unprefixed_job_named_gate():
+    assert repo_admin._collapse_matrix_legs(
+        {"git-gate", "git (ubuntu-24.04)", "git (ubuntu-22.04)"}
+    ) == {"git-gate"}
+
+
+def test_collapse_matrix_legs_keeps_legs_without_a_gate():
+    legs = {"test (0.42)", "test (0.43)"}
+    assert repo_admin._collapse_matrix_legs(set(legs)) == legs
+
+
+def test_collapse_matrix_legs_keeps_the_generator_and_plain_checks():
+    assert repo_admin._collapse_matrix_legs(
+        {"jj / gate", "jj / versions", "jj / test (0.42)", "hk / hk"}
+    ) == {"jj / gate", "jj / versions", "hk / hk"}
+
+
+def test_collapse_matrix_legs_matches_gate_only_within_the_same_prefix():
+    contexts = {"gate", "jj / test (0.42)"}
+    assert repo_admin._collapse_matrix_legs(set(contexts)) == contexts
+
+
 def _protection_state(*, contexts=("build", "test"), **overrides):
     state = {
         "required_status_checks": {"contexts": list(contexts), "strict": True},

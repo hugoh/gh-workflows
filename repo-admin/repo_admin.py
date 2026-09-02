@@ -48,6 +48,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import enum
+import re
 import sys
 
 import activity
@@ -607,7 +608,7 @@ async def _check_run_contexts(owner: str, name: str, shas: list[str]) -> list[st
         if run["conclusion"] == "skipped" and " / " not in run["name"]
     }
     if not suspect:
-        return sorted(contexts)
+        return sorted(_collapse_matrix_legs(contexts))
 
     for sha in shas[1:]:
         if not suspect:
@@ -621,7 +622,31 @@ async def _check_run_contexts(owner: str, name: str, shas: list[str]) -> list[st
                 contexts.add(run["name"])
                 suspect.discard(base)
 
-    return sorted(contexts)
+    return sorted(_collapse_matrix_legs(contexts))
+
+
+_MATRIX_LEG = re.compile(r"^(?P<prefix>.*?(?: / )?)(?P<job>[^/]+) \(.+\)$")
+
+
+def _collapse_matrix_legs(contexts: set[str]) -> set[str]:
+    """Drop matrix child checks ("jj / test (0.42)") when a sibling gate check
+    ("jj / gate", "git-gate") covers them. Matrix leg names carry the varied
+    value (a tool version, a runner label) and churn as that value moves, so
+    requiring them by name leaves a stale context stuck pending after every
+    bump; the gate is a stable stand-in. Without a gate the legs are kept, so
+    protection is never silently weakened.
+    """
+    kept = set()
+    for name in contexts:
+        match = _MATRIX_LEG.match(name)
+        if match and _gate_sibling(match["prefix"], match["job"]) & contexts:
+            continue
+        kept.add(name)
+    return kept
+
+
+def _gate_sibling(prefix: str, job: str) -> set[str]:
+    return {f"{prefix}gate", f"{prefix}{job}-gate", f"{prefix}{job} / gate"}
 
 
 def _plan_gated_result(repo: Repo, *, tag: Tag | None = None) -> RepoResult:
