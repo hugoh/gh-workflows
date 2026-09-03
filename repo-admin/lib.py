@@ -4,20 +4,44 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import enum
 import os
 import subprocess
 import sys
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any
 
 import httpx2
 import yaml
 from nacl import encoding, public
-from rich.console import Console
-from rich.progress import Progress
+from reconcilekit.render import console
+
+from reconcilekit import (
+    ReconcileError,
+    Status,
+    classify_status,
+    partition_fields,
+    print_status,
+    progress_bar,
+    result_line,
+    run_reconcile,
+    summary_status,
+    unavailable_suffix,
+)
+from reconcilekit import run_parallel as _run_parallel
+
+__all__ = [  # re-exported from reconcilekit for repo-admin's other modules
+    "Status",
+    "classify_status",
+    "console",
+    "partition_fields",
+    "print_status",
+    "progress_bar",
+    "result_line",
+    "run_reconcile",
+    "summary_status",
+    "unavailable_suffix",
+]
 
 LIB_DIR = Path(__file__).resolve().parent
 CONFIG_DIR = LIB_DIR / "config"
@@ -30,121 +54,8 @@ SECRETS_FILE = CONFIG_DIR / "secrets.yaml"
 SECRETS_ENC_FILE = CONFIG_DIR / "secrets.enc.yaml"
 SOPS_CONFIG_FILE = CONFIG_DIR / ".sops.yaml"
 
-console = Console()
 
-
-def progress_bar(*, console: Console = console, **kwargs: Any) -> Progress:
-    """A Progress bound to `console` (module-level `console` by default),
-    silenced when its console isn't a terminal -- e.g. `cmd > file` or
-    piping into another command -- so its status text (which Progress still
-    renders as plain lines even without a tty) doesn't end up mixed into
-    redirected output.
-    """
-    return Progress(console=console, disable=not console.is_terminal, **kwargs)
-
-
-class Status(enum.Enum):
-    """How a repo's result line relates to the desired end state -- distinct
-    from RepoResult.tag, which is per-command bookkeeping used for
-    end-of-run summaries.
-    """
-
-    OK = "ok"  # full target reached, changed this run
-    UNCHANGED = "unchanged"  # full target reached, already was
-    LIMITED = "limited"  # best-effort (capped by plan/data) reached, changed this run
-    LIMITED_UNCHANGED = "limited_unchanged"  # best-effort reached, already was
-    FAILED = "failed"  # worker raised
-
-
-_STATUS_DISPLAY: dict[Status, tuple[str, str]] = {
-    Status.OK: ("✓", "green"),
-    Status.UNCHANGED: ("•", "green"),
-    Status.LIMITED: ("○", "yellow"),
-    Status.LIMITED_UNCHANGED: ("•", "yellow"),
-    Status.FAILED: ("✗", "red"),
-}
-
-
-def classify_status(at_target: bool, changed: bool) -> Status:
-    if at_target:
-        return Status.OK if changed else Status.UNCHANGED
-    return Status.LIMITED if changed else Status.LIMITED_UNCHANGED
-
-
-def partition_fields(fields: dict[str, tuple[bool, bool]]) -> dict[str, list[str]]:
-    """Splits a `name -> (currently_enabled, available_on_this_plan)` mapping
-    into the two lists every "enable a set of toggles" command reports:
-    `would_enable` (available but off) and `unavailable` (plan-gated).
-    """
-    return {
-        "would_enable": [
-            name
-            for name, (enabled, available) in fields.items()
-            if available and not enabled
-        ],
-        "unavailable": [
-            name for name, (_enabled, available) in fields.items() if not available
-        ],
-    }
-
-
-def summary_status(summary: dict[str, list[str]]) -> Status:
-    """Status for a partition_fields() summary: at target once nothing is
-    plan-gated, changed when there's anything left to enable.
-    """
-    return classify_status(
-        at_target=not summary["unavailable"], changed=bool(summary["would_enable"])
-    )
-
-
-def unavailable_suffix(unavailable: list[str]) -> str:
-    return f" (unavailable: {', '.join(unavailable)})" if unavailable else ""
-
-
-_State = TypeVar("_State")
-
-
-async def run_reconcile(
-    *,
-    dry_run: bool,
-    fetch: Callable[[], Awaitable[_State]],
-    plan_result: Callable[[_State], RepoResult],
-    apply_result: Callable[[_State], Awaitable[RepoResult]],
-) -> RepoResult:
-    """Fetch-then-branch skeleton shared by the mutating workers: read the
-    repo's current state once, then either report the plan (dry run) or
-    apply the change and report the outcome. Each worker keeps its own
-    planning, API calls, and result formatting in the three callables.
-    """
-    state = await fetch()
-    if dry_run:
-        return plan_result(state)
-    return await apply_result(state)
-
-
-def result_line(name: str, detail: str, status: Status) -> str:
-    prefix = (
-        "unchanged: " if status in (Status.UNCHANGED, Status.LIMITED_UNCHANGED) else ""
-    )
-    return f"{name:<30} {prefix}{detail}"
-
-
-def print_status(status: Status, line: str) -> None:
-    # Always goes through the single Console that Progress/Live owns
-    # (run_parallel passes it to Progress(console=...)): a second Console
-    # writing to a separate stream isn't coordinated by rich's Live
-    # redraw bookkeeping and can visually corrupt output on a real
-    # terminal (see run_parallel's failure-path comment).
-    symbol, color = _STATUS_DISPLAY[status]
-    # markup=False: `line` can contain repo/error text with literal "[" (dict
-    # reprs, error messages) that would otherwise be parsed as rich markup.
-    # highlight=False: rich's default ReprHighlighter recolors numbers,
-    # paths, etc. within the line (e.g. a repo named "foo-410"), fighting
-    # with the single status color we want for the whole line.
-    console.print(f"{symbol} {line}", style=color, markup=False, highlight=False)
-
-
-class GhError(RuntimeError):
+class GhError(ReconcileError):
     """A GitHub API call -- or a repo's worker function -- failed unexpectedly.
 
     status_code is set for HTTP errors raised by api_json(), so callers can
@@ -528,69 +439,11 @@ def as_set(value: str | None) -> set[str] | None:
     return {v.strip() for v in value.split(",") if v.strip()}
 
 
-_QUIET_STATUSES = (Status.UNCHANGED, Status.LIMITED_UNCHANGED)
-
-
 async def run_parallel(
     repos: list[Repo], worker, jobs: int = DEFAULT_JOBS, verbose: bool = False
 ) -> list[RepoResult]:
-    """Runs worker(repo) for each repo concurrently (bounded by a semaphore
-    -- these are I/O-bound `gh`/network calls, not CPU-bound work), printing
-    each result's line as soon as it's ready (completion order, not
-    submission order) above a live progress bar, and returning every
-    RepoResult.
-
-    A worker exception is caught inside call() itself -- not left to
-    propagate through the TaskGroup -- so one repo failing doesn't cancel
-    the others (TaskGroup cancels every sibling task the moment any task
-    raises). Instead it's printed as a failure line and collected; once
-    every repo has been attempted, any failures are raised together as a
-    single GhError so the run still ends with a nonzero exit.
-
-    Unless verbose=True, a repo already at its target (UNCHANGED /
-    LIMITED_UNCHANGED) isn't printed live -- on a real account-wide run the
-    handful of lines that represent an actual change would otherwise be
-    lost in a wall of "unchanged: ..." lines. Suppressed lines are counted
-    and reported as a single dim summary line instead.
+    """reconcilekit.run_parallel with repo-admin's failure exception type bound
+    (so callers keep catching GhError). See reconcilekit.kernel for the
+    concurrency, failure-isolation, and quiet-suppression behaviour.
     """
-    results: list[RepoResult] = []
-    failed_names: list[str] = []
-    unchanged_count = 0
-    sem = asyncio.Semaphore(jobs)
-
-    with progress_bar() as progress:
-        task = progress.add_task("Processing repos...", total=len(repos))
-
-        async def call(repo: Repo) -> None:
-            nonlocal unchanged_count
-            async with sem:
-                try:
-                    result = await worker(repo)
-                except Exception as exc:  # noqa: BLE001 -- collected below, not swallowed
-                    failed_names.append(repo.name)
-                    print_status(Status.FAILED, f"{repo.name}: {exc}")
-                else:
-                    if not verbose and result.status in _QUIET_STATUSES:
-                        unchanged_count += 1
-                    else:
-                        print_status(result.status, result.line)
-                    results.append(result)
-                finally:
-                    progress.advance(task)
-
-        async with asyncio.TaskGroup() as tg:
-            for repo in repos:
-                tg.create_task(call(repo))
-
-    if unchanged_count:
-        console.print(
-            f"  {unchanged_count} unchanged (rerun with --verbose to see them)",
-            style="dim",
-        )
-
-    if failed_names:
-        raise GhError(
-            f"{len(failed_names)} repo(s) failed: {', '.join(sorted(failed_names))}"
-        )
-
-    return results
+    return await _run_parallel(repos, worker, jobs, verbose, error_cls=GhError)
