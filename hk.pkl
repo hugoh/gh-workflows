@@ -9,11 +9,16 @@ local linters = new Mapping<String, Step> {
     ...Base.shell
     ...Base.python
     ["uv-sync"] = {
-        dir = "repo-admin"
         check = "uv sync"
     }
     ["pytest"] = {
         dir = "repo-admin"
+        check = "uv run pytest"
+        profiles = List("ci")
+        depends = List("uv-sync")
+    }
+    ["reconcilekit-pytest"] = {
+        dir = "reconcilekit"
         check = "uv run pytest"
         profiles = List("ci")
         depends = List("uv-sync")

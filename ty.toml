@@ -1,2 +1,2 @@
 [environment]
-python = "repo-admin/.venv"
+python = ".venv"

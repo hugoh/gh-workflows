@@ -95,7 +95,10 @@ reuses `gh`'s existing login rather than managing a separate credential). A
 single Python CLI (`repo_admin.py`, run through `uv`) with `<resource> <verb>`
 subcommands, `gh`/`aws`/`docker`-style; repos are processed in parallel
 (`GH_JOBS`, default 6). Config data lives under `repo-admin/config/`, separate
-from the `.py` source. Forks are excluded by default — except those listed in
+from the `.py` source. The stateless fetch-diff-apply reconcile loop each
+`sync` command runs on (`run_reconcile` / `run_parallel` / `Status`) lives in
+`reconcilekit/`, a domain-agnostic uv-workspace package. Forks are excluded by
+default — except those listed in
 `config/include-forks.txt`; edit that file to add more, or override per-run
 with `GH_INCLUDE_FORKS` (comma-separated). Every subcommand accepts trailing
 repo names to scope to a subset (default: every repo) and `--skip
