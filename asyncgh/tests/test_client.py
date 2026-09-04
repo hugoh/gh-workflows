@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -385,6 +386,40 @@ async def test_github_client_max_retries_overrides_the_default(
     gh = GitHubClient(max_retries=1)
     await gh.api_raw("GET", "/x")
     assert route.call_count == 2  # 1 retry + the initial attempt
+    await gh.aclose()
+
+
+async def test_viewer_caches_the_authenticated_login_across_calls(
+    httpx2_mock: respx.Router,
+):
+    route = httpx2_mock.get(f"{API_BASE}/user").mock(
+        return_value=httpx.Response(200, json={"login": "hugoh"})
+    )
+    gh = GitHubClient(token="t")
+    assert await gh.viewer() == "hugoh"
+    assert await gh.viewer() == "hugoh"
+    assert route.call_count == 1
+    await gh.aclose()
+
+
+async def test_viewer_concurrent_callers_share_one_request(
+    httpx2_mock: respx.Router,
+):
+    # The mocked transport normally resolves without ever suspending, so
+    # concurrent callers would run to completion one at a time regardless of
+    # locking and never actually race. Force a real suspension point inside
+    # the request so the second caller's check-then-await genuinely
+    # interleaves with the first's, the way it would over a real network
+    # call.
+    async def delayed_response(request):
+        await asyncio.sleep(0)
+        return httpx.Response(200, json={"login": "hugoh"})
+
+    route = httpx2_mock.get(f"{API_BASE}/user").mock(side_effect=delayed_response)
+    gh = GitHubClient(token="t")
+    results = await asyncio.gather(*(gh.viewer() for _ in range(5)))
+    assert results == ["hugoh"] * 5
+    assert route.call_count == 1
     await gh.aclose()
 
 

@@ -144,6 +144,8 @@ class GitHubClient:
         )
         self._http: httpx2.AsyncClient | None = None
         self._lock = asyncio.Lock()
+        self._viewer: str | None = None
+        self._viewer_lock = asyncio.Lock()
 
     async def _get_http(self) -> httpx2.AsyncClient:
         if self._http is None:
@@ -159,6 +161,19 @@ class GitHubClient:
                         timeout=30,
                     )
         return self._http
+
+    async def viewer(self) -> str:
+        """The login of the authenticated user (`GET /user`), cached for the
+        life of this client -- it's the same account for as long as the
+        client's token doesn't change, so repeated callers (e.g. fetch_repos
+        on every invocation) share one request instead of each firing their
+        own.
+        """
+        if self._viewer is None:
+            async with self._viewer_lock:
+                if self._viewer is None:
+                    self._viewer = (await self.api_json("GET", "/user"))["login"]
+        return self._viewer
 
     async def aclose(self) -> None:
         if self._http is not None:
