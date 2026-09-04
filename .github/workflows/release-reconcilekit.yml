@@ -27,11 +27,10 @@ jobs:
           enable-cache: false
 
       - name: Build package
-        working-directory: reconcilekit
-        run: uv build
+        run: uv build --package reconcilekit
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
-          packages-dir: reconcilekit/dist
+          packages-dir: dist
           skip-existing: true
