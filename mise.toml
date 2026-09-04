@@ -32,7 +32,21 @@ description = "Run the reconcilekit test suite"
 dir = "reconcilekit"
 run = "uv run pytest"
 
-[tasks."test:ghapi"]
-description = "Run the ghapi test suite"
-dir = "ghapi"
+[tasks."test:asyncgh"]
+description = "Run the asyncgh test suite"
+dir = "asyncgh"
 run = "uv run pytest"
+
+[tasks.docs]
+description = "Build API docs for every documented package into public/"
+depends = ["docs:*"]
+
+[tasks."docs:asyncgh"]
+description = "Build asyncgh's API docs"
+dir = "asyncgh"
+run = "uv run --with pdoc pdoc asyncgh --output-directory ../public/asyncgh"
+
+[tasks."docs:reconcilekit"]
+description = "Build reconcilekit's API docs"
+dir = "reconcilekit"
+run = "uv run --with pdoc pdoc reconcilekit --output-directory ../public/reconcilekit"

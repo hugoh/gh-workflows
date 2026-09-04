@@ -19,7 +19,7 @@ REPO_B = Repo(name="repo-b", default_branch="main", is_private=True, is_fork=Fal
 
 @pytest.fixture(autouse=True)
 def fake_auth_token(monkeypatch):
-    monkeypatch.setattr("ghapi.client._auth_token", lambda: "fake-token")
+    monkeypatch.setattr("asyncgh.client._auth_token", lambda: "fake-token")
 
 
 # ---------------------------------------------------------------------------

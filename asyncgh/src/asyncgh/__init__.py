@@ -1,4 +1,4 @@
-"""ghapi -- the GitHub REST API transport shared by repo-admin's scripts.
+"""asyncgh -- the GitHub REST API transport shared by repo-admin's scripts.
 
 Auth via the token `gh` already holds, one shared async client, raw and
 raise-on-error request helpers, `Link`-header pagination, and thin wrappers
@@ -16,6 +16,7 @@ from .client import (
     api_json,
     api_request,
     error_message,
+    graphql,
     paginated,
 )
 from .endpoints import (
@@ -34,6 +35,7 @@ __all__ = [
     "encrypt_secret_value",
     "error_message",
     "fetch_repos_json",
+    "graphql",
     "paginated",
     "public_repos_json",
     "set_repo_secret",

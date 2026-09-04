@@ -1,6 +1,6 @@
 import pytest
 
-from ghapi import client
+from asyncgh import client
 
 
 @pytest.fixture(autouse=True)

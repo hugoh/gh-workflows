@@ -12,8 +12,6 @@ from typing import Any
 import httpx2
 import stamina
 
-from reconcilekit import ReconcileError
-
 API_BASE = "https://api.github.com"
 
 # Retry transport failures and transient statuses (429 + 5xx). `attempts` is
@@ -27,13 +25,17 @@ RETRY_WAIT_MAX = 60.0
 RETRY_WAIT_JITTER = 1.0
 
 
-class GhError(ReconcileError):
+class GhError(RuntimeError):
     """A GitHub API call -- or a caller's worker function -- failed
     unexpectedly.
 
     status_code is set for HTTP errors raised by api_json(), so callers can
     branch on the real status code (e.g. 403 vs 404) instead of
-    string-matching an error message.
+    string-matching an error message. Plain RuntimeError rather than a
+    reconcilekit.ReconcileError subclass -- asyncgh has no dependency on
+    reconcilekit, so it stays installable standalone; reconcilekit's own
+    run_parallel(..., error_cls=) only requires type[Exception], so GhError
+    still works there unchanged.
     """
 
     def __init__(self, message: str, *, status_code: int | None = None):
@@ -164,6 +166,61 @@ async def api_json(
     if not response.is_success:
         raise GhError(error_message(response), status_code=response.status_code)
     return response.json() if response.content else {}
+
+
+class _GraphQLRateLimited(Exception):
+    """Internal marker: GraphQL answered 200 with errors[].type ==
+    RATE_LIMITED, which api_request's transport/5xx retry never sees since
+    it only looks at the HTTP status. Retried at this layer instead.
+    """
+
+
+async def graphql(query: str, variables: dict | None = None) -> dict:
+    """Runs one GraphQL query and returns its `data` object.
+
+    GraphQL always answers HTTP 200, even for query errors, so success lives
+    in the body: `errors` present (with `data` null or partial) raises
+    GhError with the joined messages -- callers have no partial-data story,
+    so partial loss is worse than a loud failure. RATE_LIMITED errors retry
+    (stamina, same backoff as api_request) since they're the one transient
+    GraphQL failure mode; other GraphQL errors (bad query, not found) are
+    not transient and raise immediately.
+    """
+    try:
+        async for attempt in stamina.retry_context(
+            on=lambda exc: isinstance(exc, _GraphQLRateLimited),
+            attempts=MAX_RETRIES + 1,
+            timeout=None,
+            wait_initial=RETRY_WAIT_INITIAL,
+            wait_max=RETRY_WAIT_MAX,
+            wait_jitter=RETRY_WAIT_JITTER,
+        ):
+            with attempt:
+                response = await api_request(
+                    "POST",
+                    "/graphql",
+                    json={"query": query, "variables": variables or {}},
+                )
+                if not response.is_success:
+                    raise GhError(
+                        error_message(response), status_code=response.status_code
+                    )
+                body = response.json()
+                errors = body.get("errors")
+                if errors:
+                    if any(error.get("type") == "RATE_LIMITED" for error in errors):
+                        raise _GraphQLRateLimited(
+                            "; ".join(
+                                error.get("message", str(error)) for error in errors
+                            )
+                        )
+                    raise GhError(
+                        "; ".join(error.get("message", str(error)) for error in errors)
+                    )
+                return body["data"]
+    except _GraphQLRateLimited as exc:
+        raise GhError(str(exc)) from exc
+    raise GhError("graphql retry loop exited without a response")  # unreachable
 
 
 async def paginated(

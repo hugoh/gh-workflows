@@ -1,10 +1,20 @@
+import json
+
 import httpx
 import httpx2
 import pytest
 import respx
-from ghapi.client import _should_retry
+from asyncgh.client import _should_retry
 
-from ghapi import API_BASE, GhError, api_json, api_request, client, error_message
+from asyncgh import (
+    API_BASE,
+    GhError,
+    api_json,
+    api_request,
+    client,
+    error_message,
+    graphql,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -168,3 +178,94 @@ def test_should_retry_true_for_transport_error():
 
 def test_should_retry_false_for_other_exception():
     assert _should_retry(ValueError("nope")) is False
+
+
+async def test_graphql_posts_query_and_variables_and_returns_data(
+    httpx2_mock: respx.Router,
+):
+    route = httpx2_mock.post(f"{API_BASE}/graphql").mock(
+        return_value=httpx.Response(200, json={"data": {"viewer": {"login": "hugoh"}}})
+    )
+    data = await graphql("query { viewer { login } }", {"x": 1})
+    assert data == {"viewer": {"login": "hugoh"}}
+    body = json.loads(route.calls[0].request.content)
+    assert body == {"query": "query { viewer { login } }", "variables": {"x": 1}}
+
+
+async def test_graphql_raises_gh_error_when_errors_present_and_data_null(
+    httpx2_mock: respx.Router,
+):
+    httpx2_mock.post(f"{API_BASE}/graphql").mock(
+        return_value=httpx.Response(
+            200, json={"data": None, "errors": [{"message": "Could not resolve"}]}
+        )
+    )
+    with pytest.raises(GhError, match="Could not resolve"):
+        await graphql("query { nope }")
+
+
+async def test_graphql_raises_gh_error_when_errors_present_alongside_partial_data(
+    httpx2_mock: respx.Router,
+):
+    httpx2_mock.post(f"{API_BASE}/graphql").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {"r0": {"name": "a"}, "r1": None},
+                "errors": [{"message": "r1 not found"}],
+            },
+        )
+    )
+    with pytest.raises(GhError, match="r1 not found"):
+        await graphql("query { r0 r1 }")
+
+
+async def test_graphql_retries_on_transport_error_via_api_request(
+    httpx2_mock: respx.Router,
+):
+    route = httpx2_mock.post(f"{API_BASE}/graphql").mock(
+        side_effect=[
+            httpx2.ConnectError("boom"),
+            httpx.Response(200, json={"data": {"ok": True}}),
+        ]
+    )
+    data = await graphql("query { ok }")
+    assert data == {"ok": True}
+    assert route.call_count == 2
+
+
+async def test_graphql_retries_rate_limited_error_then_succeeds(
+    httpx2_mock: respx.Router,
+):
+    route = httpx2_mock.post(f"{API_BASE}/graphql").mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={
+                    "data": None,
+                    "errors": [{"type": "RATE_LIMITED", "message": "rate limited"}],
+                },
+            ),
+            httpx.Response(200, json={"data": {"ok": True}}),
+        ]
+    )
+    data = await graphql("query { ok }")
+    assert data == {"ok": True}
+    assert route.call_count == 2
+
+
+async def test_graphql_raises_gh_error_after_exhausting_rate_limited_retries(
+    httpx2_mock: respx.Router,
+):
+    route = httpx2_mock.post(f"{API_BASE}/graphql").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": None,
+                "errors": [{"type": "RATE_LIMITED", "message": "rate limited"}],
+            },
+        )
+    )
+    with pytest.raises(GhError, match="rate limited"):
+        await graphql("query { ok }")
+    assert route.call_count == client.MAX_RETRIES + 1

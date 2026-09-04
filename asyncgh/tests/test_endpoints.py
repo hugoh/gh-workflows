@@ -4,7 +4,7 @@ import httpx
 import respx
 from nacl import encoding, public
 
-from ghapi import (
+from asyncgh import (
     API_BASE,
     encrypt_secret_value,
     endpoints,

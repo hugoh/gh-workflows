@@ -20,15 +20,10 @@ compares it to what you want, and either reports the plan or applies it.
 
 ## API
 
-| Symbol | Purpose |
-|---|---|
-| `run_reconcile(*, dry_run, fetch, plan_result, apply_result)` | the per-target fetch-then-branch skeleton |
-| `run_parallel(targets, worker, jobs=6, verbose=False, *, error_cls=ReconcileError)` | bounded-parallel fleet runner; streams result lines above a progress bar, hides no-op lines unless `verbose` |
-| `Result(target, line, status=Status.OK, tag=None)` | a worker's return value |
-| `Status`, `classify_status(at_target, changed)` | the outcome vocabulary |
-| `partition_fields`, `summary_status`, `unavailable_suffix` | helpers for "enable a set of toggles, some of them gated" commands |
-| `result_line`, `print_status`, `progress_bar` | the default terminal renderer |
-| `HasName`, `ReconcileError` | the target protocol and the base failure type |
+Full API reference, generated from the docstrings:
+[hugoh.github.io/gh-workflows/reconcilekit](https://hugoh.github.io/gh-workflows/reconcilekit/)
+(rebuilt on every push that touches this package -- see
+`.github/workflows/docs.yml`).
 
 ## Example
 
@@ -93,4 +88,4 @@ asyncio.run(run_parallel(files, make_worker(dry_run=True)))
 ## Consumers
 
 `repo-admin/` (in this repo) uses it for every account-wide GitHub `sync`
-command. It is not published to PyPI — it is consumed as a uv workspace member.
+command, consumed as a uv workspace member there.

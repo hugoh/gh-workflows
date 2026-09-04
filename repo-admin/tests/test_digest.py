@@ -1,11 +1,9 @@
 from datetime import UTC, datetime
-from email import message_from_bytes
-from typing import ClassVar
 
 import httpx
 import pytest
 import respx
-from digest import fetch_issues, fetch_prs, fetch_releases, render_html, send_email
+from digest import build_parser, fetch_activity, render_html
 from lib import API_BASE, Repo
 
 # open PRs cover the last 14 days, closed PRs the last 7 -- both windows
@@ -19,83 +17,135 @@ REPO_A = Repo(name="repo-a", default_branch="main", is_private=False, is_fork=Fa
 REPO_B = Repo(name="repo-b", default_branch="main", is_private=False, is_fork=False)
 
 
-def _pr(
+@pytest.fixture(autouse=True)
+def fake_auth_token(monkeypatch):
+    monkeypatch.setattr("asyncgh.client._auth_token", lambda: "fake-token")
+
+
+# ---------------------------------------------------------------------------
+# fetch_activity
+#
+# fetch_activity fetches PRs, issues, and releases for every repo in one
+# GraphQL query per batch of up to _BATCH_SIZE repos (aliased r0, r1, ...),
+# filtering each connection's nodes by `since_fetch` (the caller passes the
+# oldest of the open/closed/release windows -- render_html does the actual
+# per-section windowing on top).
+# ---------------------------------------------------------------------------
+
+
+def _gql_pr(
     number=1,
     title="Add feature",
     created_at="2026-07-20T10:00:00Z",
     updated_at=None,
     closed_at=None,
-    merged_at=None,
-    state="open",
+    state="OPEN",
+    login="octocat",
+    mergeable="MERGEABLE",
+    rollup_state="SUCCESS",
+):
+    return {
+        "number": number,
+        "title": title,
+        "url": f"https://github.com/hugoh/repo-a/pull/{number}",
+        "state": state,
+        "createdAt": created_at,
+        "updatedAt": updated_at or closed_at or created_at,
+        "closedAt": closed_at,
+        "author": {"login": login},
+        "mergeable": mergeable,
+        "commits": {
+            "nodes": [
+                {
+                    "commit": {
+                        "statusCheckRollup": (
+                            {"state": rollup_state} if rollup_state else None
+                        )
+                    }
+                }
+            ]
+        },
+    }
+
+
+def _gql_issue(
+    number=1,
+    title="Something broke",
+    created_at="2026-07-20T10:00:00Z",
+    updated_at=None,
+    closed_at=None,
+    state="OPEN",
     login="octocat",
 ):
     return {
         "number": number,
         "title": title,
-        "html_url": f"https://github.com/hugoh/repo-a/pull/{number}",
-        "user": {"login": login},
-        "created_at": created_at,
-        "updated_at": updated_at or closed_at or created_at,
-        "closed_at": closed_at,
-        "merged_at": merged_at,
+        "url": f"https://github.com/hugoh/repo-a/issues/{number}",
         "state": state,
-        "head": {"sha": f"sha{number}"},
+        "createdAt": created_at,
+        "updatedAt": updated_at or closed_at or created_at,
+        "closedAt": closed_at,
+        "author": {"login": login},
     }
 
 
-def _mock_open_pr_extras(
-    httpx2_mock: respx.Router,
-    repo="repo-a",
-    number=1,
-    sha=None,
-    check_runs=None,
-    mergeable_state="clean",
+def _gql_release(
+    tag_name="v1.0.0",
+    name="Version 1.0.0",
+    published_at="2026-07-20T10:00:00Z",
+    created_at=None,
+    is_draft=False,
+    is_prerelease=False,
 ):
-    """Open PRs get two extra fetches (CI status, mergeable state) that
-    closed PRs skip -- mock both for a given repo/PR/sha.
-    """
-    sha = sha or f"sha{number}"
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/{repo}/commits/{sha}/check-runs").mock(
+    return {
+        "tagName": tag_name,
+        "name": name,
+        "url": f"https://github.com/hugoh/repo-a/releases/tag/{tag_name}",
+        "publishedAt": published_at,
+        "createdAt": created_at or published_at,
+        "isDraft": is_draft,
+        "isPrerelease": is_prerelease,
+    }
+
+
+def _repo_data(
+    prs=(),
+    issues=(),
+    releases=(),
+    pr_has_next=False,
+    issue_has_next=False,
+    release_has_next=False,
+):
+    return {
+        "pullRequests": {
+            "pageInfo": {"hasNextPage": pr_has_next},
+            "nodes": list(prs),
+        },
+        "issues": {
+            "pageInfo": {"hasNextPage": issue_has_next},
+            "nodes": list(issues),
+        },
+        "releases": {
+            "pageInfo": {"hasNextPage": release_has_next},
+            "nodes": list(releases),
+        },
+    }
+
+
+def _mock_graphql(httpx2_mock: respx.Router, *repo_data: dict) -> respx.Route:
+    return httpx2_mock.post(f"{API_BASE}/graphql").mock(
         return_value=httpx.Response(
             200,
-            json={
-                "check_runs": check_runs if check_runs is not None else [_check_run()]
-            },
+            json={"data": {f"r{i}": data for i, data in enumerate(repo_data)}},
         )
     )
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/{repo}/pulls/{number}").mock(
-        return_value=httpx.Response(200, json={"mergeable_state": mergeable_state})
+
+
+async def test_fetch_activity_normalizes_pr_fields(httpx2_mock: respx.Router):
+    _mock_graphql(
+        httpx2_mock, _repo_data(prs=[_gql_pr(number=5, title="Fix bug", login="hugoh")])
     )
-
-
-def _check_run(status="completed", conclusion="success"):
-    return {"status": status, "conclusion": conclusion}
-
-
-@pytest.fixture(autouse=True)
-def fake_auth_token(monkeypatch):
-    monkeypatch.setattr("ghapi.client._auth_token", lambda: "fake-token")
-
-
-# ---------------------------------------------------------------------------
-# fetch_prs
-#
-# fetch_prs itself only knows one cutoff, the oldest `updated_at` worth
-# fetching (the caller passes the older of the open/closed windows) --
-# sorted/paged by `updated` rather than `created` so a PR opened long ago
-# but closed recently is still picked up. Splitting into open/closed
-# windows happens in render_html.
-# ---------------------------------------------------------------------------
-
-
-async def test_fetch_prs_normalizes_fields(httpx2_mock: respx.Router):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
-        return_value=httpx.Response(
-            200, json=[_pr(number=5, title="Fix bug", login="hugoh")]
-        )
-    )
-    _mock_open_pr_extras(httpx2_mock, number=5)
-    prs = await fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
+    prs, _issues, _releases = await fetch_activity("hugoh", [REPO_A], SINCE_OPEN)
     assert prs == [
         {
             "repo": "repo-a",
@@ -113,140 +163,130 @@ async def test_fetch_prs_normalizes_fields(httpx2_mock: respx.Router):
     ]
 
 
-async def test_fetch_prs_excludes_prs_updated_before_since(httpx2_mock: respx.Router):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
-        return_value=httpx.Response(
-            200,
-            json=[
-                _pr(number=2, created_at="2026-07-20T10:00:00Z"),
-                _pr(number=1, created_at="2026-07-05T10:00:00Z"),
-            ],
-        )
+async def test_fetch_activity_excludes_prs_updated_before_since(
+    httpx2_mock: respx.Router,
+):
+    _mock_graphql(
+        httpx2_mock,
+        _repo_data(
+            prs=[
+                _gql_pr(number=2, created_at="2026-07-20T10:00:00Z"),
+                _gql_pr(number=1, created_at="2026-07-05T10:00:00Z"),
+            ]
+        ),
     )
-    _mock_open_pr_extras(httpx2_mock, number=2)
-    prs = await fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
+    prs, _issues, _releases = await fetch_activity("hugoh", [REPO_A], SINCE_OPEN)
     assert [pr["number"] for pr in prs] == [2]
 
 
-async def test_fetch_prs_includes_pr_opened_before_since_but_updated_after(
+async def test_fetch_activity_includes_pr_opened_before_since_but_updated_after(
     httpx2_mock: respx.Router,
 ):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
-        return_value=httpx.Response(
-            200,
-            json=[
-                _pr(
+    _mock_graphql(
+        httpx2_mock,
+        _repo_data(
+            prs=[
+                _gql_pr(
                     number=1,
                     created_at="2026-06-01T00:00:00Z",
                     updated_at="2026-07-20T00:00:00Z",
                     closed_at="2026-07-20T00:00:00Z",
-                    merged_at="2026-07-20T00:00:00Z",
-                    state="closed",
+                    state="MERGED",
                 )
-            ],
-        )
+            ]
+        ),
     )
-    prs = await fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
+    prs, _issues, _releases = await fetch_activity("hugoh", [REPO_A], SINCE_OPEN)
     assert [pr["number"] for pr in prs] == [1]
 
 
-async def test_fetch_prs_merged_true_when_merged_at_set(httpx2_mock: respx.Router):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
-        return_value=httpx.Response(
-            200,
-            json=[
-                _pr(
-                    state="closed",
-                    closed_at="2026-07-21T00:00:00Z",
-                    merged_at="2026-07-21T00:00:00Z",
-                )
-            ],
-        )
+async def test_fetch_activity_maps_merged_state_to_closed_and_merged_true(
+    httpx2_mock: respx.Router,
+):
+    _mock_graphql(
+        httpx2_mock,
+        _repo_data(prs=[_gql_pr(state="MERGED", closed_at="2026-07-21T00:00:00Z")]),
     )
-    prs = await fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
+    prs, _issues, _releases = await fetch_activity("hugoh", [REPO_A], SINCE_OPEN)
+    assert prs[0]["state"] == "closed"
     assert prs[0]["merged"] is True
 
 
-async def test_fetch_prs_merged_false_when_closed_without_merge(
+async def test_fetch_activity_maps_closed_state_to_closed_and_merged_false(
     httpx2_mock: respx.Router,
 ):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
-        return_value=httpx.Response(
-            200,
-            json=[
-                _pr(state="closed", closed_at="2026-07-21T00:00:00Z", merged_at=None)
-            ],
-        )
+    _mock_graphql(
+        httpx2_mock,
+        _repo_data(prs=[_gql_pr(state="CLOSED", closed_at="2026-07-21T00:00:00Z")]),
     )
-    prs = await fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
+    prs, _issues, _releases = await fetch_activity("hugoh", [REPO_A], SINCE_OPEN)
+    assert prs[0]["state"] == "closed"
     assert prs[0]["merged"] is False
 
 
-async def test_fetch_prs_stops_paginating_once_page_is_entirely_older_than_since(
-    httpx2_mock: respx.Router,
-):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
-        return_value=httpx.Response(
-            200, json=[_pr(number=1, created_at="2026-07-01T00:00:00Z")]
-        )
-    )
-    await fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
-    assert len(httpx2_mock.calls) == 1
+async def test_fetch_activity_maps_open_state(httpx2_mock: respx.Router):
+    _mock_graphql(httpx2_mock, _repo_data(prs=[_gql_pr(state="OPEN")]))
+    prs, _issues, _releases = await fetch_activity("hugoh", [REPO_A], SINCE_OPEN)
+    assert prs[0]["state"] == "open"
+    assert prs[0]["merged"] is False
 
 
-async def test_fetch_prs_combines_multiple_repos(httpx2_mock: respx.Router):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
-        return_value=httpx.Response(200, json=[_pr(number=1)])
+async def test_fetch_activity_combines_multiple_repos(httpx2_mock: respx.Router):
+    _mock_graphql(
+        httpx2_mock,
+        _repo_data(prs=[_gql_pr(number=1)]),
+        _repo_data(prs=[_gql_pr(number=2)]),
     )
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-b/pulls").mock(
-        return_value=httpx.Response(200, json=[_pr(number=2)])
+    prs, _issues, _releases = await fetch_activity(
+        "hugoh", [REPO_A, REPO_B], SINCE_OPEN
     )
-    _mock_open_pr_extras(httpx2_mock, repo="repo-a", number=1)
-    _mock_open_pr_extras(httpx2_mock, repo="repo-b", number=2)
-    prs = await fetch_prs("hugoh", [REPO_A, REPO_B], SINCE_OPEN)
     assert sorted((pr["repo"], pr["number"]) for pr in prs) == [
         ("repo-a", 1),
         ("repo-b", 2),
     ]
 
 
-# ---------------------------------------------------------------------------
-# fetch_issues
-# ---------------------------------------------------------------------------
-
-
-def _issue(
-    number=1,
-    title="Something broke",
-    created_at="2026-07-20T10:00:00Z",
-    updated_at=None,
-    closed_at=None,
-    state="open",
-    login="octocat",
-    is_pr=False,
+@pytest.mark.parametrize(
+    ("rollup_state", "expected_status"),
+    [
+        ("EXPECTED", "pending"),
+        ("PENDING", "pending"),
+        ("SUCCESS", "passing"),
+        ("FAILURE", "failing"),
+        ("ERROR", "failing"),
+        (None, "no checks"),
+    ],
+)
+async def test_fetch_activity_ci_status_mapping(
+    httpx2_mock: respx.Router, rollup_state, expected_status
 ):
-    item = {
-        "number": number,
-        "title": title,
-        "html_url": f"https://github.com/hugoh/repo-a/issues/{number}",
-        "user": {"login": login},
-        "created_at": created_at,
-        "updated_at": updated_at or closed_at or created_at,
-        "closed_at": closed_at,
-        "state": state,
-    }
-    if is_pr:
-        item["pull_request"] = {"url": "https://api.github.com/..."}
-    return item
+    _mock_graphql(httpx2_mock, _repo_data(prs=[_gql_pr(rollup_state=rollup_state)]))
+    prs, _issues, _releases = await fetch_activity("hugoh", [REPO_A], SINCE_OPEN)
+    assert prs[0]["ci_status"] == expected_status
 
 
-async def test_fetch_issues_normalizes_fields(httpx2_mock: respx.Router):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/issues").mock(
-        return_value=httpx.Response(
-            200, json=[_issue(number=5, title="Broken build", login="hugoh")]
-        )
+async def test_fetch_activity_mergeable_conflict_when_conflicting(
+    httpx2_mock: respx.Router,
+):
+    _mock_graphql(httpx2_mock, _repo_data(prs=[_gql_pr(mergeable="CONFLICTING")]))
+    prs, _issues, _releases = await fetch_activity("hugoh", [REPO_A], SINCE_OPEN)
+    assert prs[0]["mergeable"] == "conflict"
+
+
+async def test_fetch_activity_mergeable_clean_when_unknown(httpx2_mock: respx.Router):
+    # UNKNOWN is GraphQL's mergeable state right after a push, before GitHub
+    # finishes computing it -- treated the same as clean, not flagged.
+    _mock_graphql(httpx2_mock, _repo_data(prs=[_gql_pr(mergeable="UNKNOWN")]))
+    prs, _issues, _releases = await fetch_activity("hugoh", [REPO_A], SINCE_OPEN)
+    assert prs[0]["mergeable"] == "clean"
+
+
+async def test_fetch_activity_normalizes_issue_fields(httpx2_mock: respx.Router):
+    _mock_graphql(
+        httpx2_mock,
+        _repo_data(issues=[_gql_issue(number=5, title="Broken build", login="hugoh")]),
     )
-    issues = await fetch_issues("hugoh", [REPO_A], SINCE_OPEN)
+    _prs, issues, _releases = await fetch_activity("hugoh", [REPO_A], SINCE_OPEN)
     assert issues == [
         {
             "repo": "repo-a",
@@ -261,123 +301,61 @@ async def test_fetch_issues_normalizes_fields(httpx2_mock: respx.Router):
     ]
 
 
-async def test_fetch_issues_excludes_pull_requests(httpx2_mock: respx.Router):
-    # GitHub's /issues endpoint also returns pull requests -- those are
-    # covered by fetch_prs already and must not be double-counted here.
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/issues").mock(
-        return_value=httpx.Response(
-            200,
-            json=[
-                _issue(number=1, is_pr=True),
-                _issue(number=2, is_pr=False),
-            ],
-        )
-    )
-    issues = await fetch_issues("hugoh", [REPO_A], SINCE_OPEN)
-    assert [issue["number"] for issue in issues] == [2]
-
-
-async def test_fetch_issues_excludes_renovate_dependency_dashboard(
+async def test_fetch_activity_excludes_renovate_dependency_dashboard(
     httpx2_mock: respx.Router,
 ):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/issues").mock(
-        return_value=httpx.Response(
-            200,
-            json=[
-                _issue(number=1, title="Dependency Dashboard", login="renovate[bot]"),
-                _issue(number=2, title="Real bug"),
-            ],
-        )
+    _mock_graphql(
+        httpx2_mock,
+        _repo_data(
+            issues=[
+                _gql_issue(
+                    number=1, title="Dependency Dashboard", login="renovate[bot]"
+                ),
+                _gql_issue(number=2, title="Real bug"),
+            ]
+        ),
     )
-    issues = await fetch_issues("hugoh", [REPO_A], SINCE_OPEN)
+    _prs, issues, _releases = await fetch_activity("hugoh", [REPO_A], SINCE_OPEN)
     assert [issue["number"] for issue in issues] == [2]
 
 
-async def test_fetch_issues_keeps_dependency_dashboard_title_from_a_human(
+async def test_fetch_activity_keeps_dependency_dashboard_title_from_a_human(
     httpx2_mock: respx.Router,
 ):
     # only filter the renovate bot's own dashboard issue -- a human-authored
     # issue that happens to share its title is a real issue.
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/issues").mock(
-        return_value=httpx.Response(
-            200, json=[_issue(number=1, title="Dependency Dashboard", login="octocat")]
-        )
+    _mock_graphql(
+        httpx2_mock,
+        _repo_data(
+            issues=[_gql_issue(number=1, title="Dependency Dashboard", login="octocat")]
+        ),
     )
-    issues = await fetch_issues("hugoh", [REPO_A], SINCE_OPEN)
+    _prs, issues, _releases = await fetch_activity("hugoh", [REPO_A], SINCE_OPEN)
     assert [issue["number"] for issue in issues] == [1]
 
 
-async def test_fetch_issues_excludes_issues_updated_before_since(
+async def test_fetch_activity_excludes_issues_updated_before_since(
     httpx2_mock: respx.Router,
 ):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/issues").mock(
-        return_value=httpx.Response(
-            200,
-            json=[
-                _issue(number=2, created_at="2026-07-20T10:00:00Z"),
-                _issue(number=1, created_at="2026-07-05T10:00:00Z"),
-            ],
-        )
+    _mock_graphql(
+        httpx2_mock,
+        _repo_data(
+            issues=[
+                _gql_issue(number=2, created_at="2026-07-20T10:00:00Z"),
+                _gql_issue(number=1, created_at="2026-07-05T10:00:00Z"),
+            ]
+        ),
     )
-    issues = await fetch_issues("hugoh", [REPO_A], SINCE_OPEN)
+    _prs, issues, _releases = await fetch_activity("hugoh", [REPO_A], SINCE_OPEN)
     assert [issue["number"] for issue in issues] == [2]
 
 
-async def test_fetch_issues_stops_paginating_once_page_is_entirely_older_than_since(
-    httpx2_mock: respx.Router,
-):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/issues").mock(
-        return_value=httpx.Response(
-            200, json=[_issue(number=1, created_at="2026-07-01T00:00:00Z")]
-        )
+async def test_fetch_activity_normalizes_release_fields(httpx2_mock: respx.Router):
+    _mock_graphql(
+        httpx2_mock,
+        _repo_data(releases=[_gql_release(tag_name="v2.0.0", name="Version 2.0.0")]),
     )
-    await fetch_issues("hugoh", [REPO_A], SINCE_OPEN)
-    assert len(httpx2_mock.calls) == 1
-
-
-async def test_fetch_issues_combines_multiple_repos(httpx2_mock: respx.Router):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/issues").mock(
-        return_value=httpx.Response(200, json=[_issue(number=1)])
-    )
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-b/issues").mock(
-        return_value=httpx.Response(200, json=[_issue(number=2)])
-    )
-    issues = await fetch_issues("hugoh", [REPO_A, REPO_B], SINCE_OPEN)
-    assert sorted((issue["repo"], issue["number"]) for issue in issues) == [
-        ("repo-a", 1),
-        ("repo-b", 2),
-    ]
-
-
-# ---------------------------------------------------------------------------
-# fetch_releases
-# ---------------------------------------------------------------------------
-
-
-def _release(
-    tag_name="v1.0.0",
-    name="Version 1.0.0",
-    published_at="2026-07-20T10:00:00Z",
-    draft=False,
-    prerelease=False,
-):
-    return {
-        "tag_name": tag_name,
-        "name": name,
-        "html_url": f"https://github.com/hugoh/repo-a/releases/tag/{tag_name}",
-        "published_at": published_at,
-        "draft": draft,
-        "prerelease": prerelease,
-    }
-
-
-async def test_fetch_releases_normalizes_fields(httpx2_mock: respx.Router):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/releases").mock(
-        return_value=httpx.Response(
-            200, json=[_release(tag_name="v2.0.0", name="Version 2.0.0")]
-        )
-    )
-    releases = await fetch_releases("hugoh", [REPO_A], SINCE_RELEASE)
+    _prs, _issues, releases = await fetch_activity("hugoh", [REPO_A], SINCE_RELEASE)
     assert releases == [
         {
             "repo": "repo-a",
@@ -390,122 +368,69 @@ async def test_fetch_releases_normalizes_fields(httpx2_mock: respx.Router):
     ]
 
 
-async def test_fetch_releases_falls_back_to_tag_name_when_name_blank(
+async def test_fetch_activity_falls_back_to_tag_name_when_name_blank(
     httpx2_mock: respx.Router,
 ):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/releases").mock(
-        return_value=httpx.Response(200, json=[_release(tag_name="v2.0.0", name="")])
+    _mock_graphql(
+        httpx2_mock, _repo_data(releases=[_gql_release(tag_name="v2.0.0", name="")])
     )
-    releases = await fetch_releases("hugoh", [REPO_A], SINCE_RELEASE)
+    _prs, _issues, releases = await fetch_activity("hugoh", [REPO_A], SINCE_RELEASE)
     assert releases[0]["name"] == "v2.0.0"
 
 
-async def test_fetch_releases_excludes_drafts(httpx2_mock: respx.Router):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/releases").mock(
-        return_value=httpx.Response(200, json=[_release(draft=True, published_at=None)])
+async def test_fetch_activity_excludes_draft_releases(httpx2_mock: respx.Router):
+    _mock_graphql(
+        httpx2_mock,
+        _repo_data(releases=[_gql_release(is_draft=True, published_at=None)]),
     )
-    releases = await fetch_releases("hugoh", [REPO_A], SINCE_RELEASE)
+    _prs, _issues, releases = await fetch_activity("hugoh", [REPO_A], SINCE_RELEASE)
     assert releases == []
 
 
-async def test_fetch_releases_marks_prerelease(httpx2_mock: respx.Router):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/releases").mock(
-        return_value=httpx.Response(200, json=[_release(prerelease=True)])
-    )
-    releases = await fetch_releases("hugoh", [REPO_A], SINCE_RELEASE)
+async def test_fetch_activity_marks_prerelease(httpx2_mock: respx.Router):
+    _mock_graphql(httpx2_mock, _repo_data(releases=[_gql_release(is_prerelease=True)]))
+    _prs, _issues, releases = await fetch_activity("hugoh", [REPO_A], SINCE_RELEASE)
     assert releases[0]["prerelease"] is True
 
 
-async def test_fetch_releases_excludes_releases_published_before_since(
+async def test_fetch_activity_excludes_releases_published_before_since(
     httpx2_mock: respx.Router,
 ):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/releases").mock(
-        return_value=httpx.Response(
-            200,
-            json=[
-                _release(tag_name="v2.0.0", published_at="2026-07-20T10:00:00Z"),
-                _release(tag_name="v1.0.0", published_at="2026-07-01T10:00:00Z"),
-            ],
-        )
+    _mock_graphql(
+        httpx2_mock,
+        _repo_data(
+            releases=[
+                _gql_release(tag_name="v2.0.0", published_at="2026-07-20T10:00:00Z"),
+                _gql_release(tag_name="v1.0.0", published_at="2026-07-01T10:00:00Z"),
+            ]
+        ),
     )
-    releases = await fetch_releases("hugoh", [REPO_A], SINCE_RELEASE)
+    _prs, _issues, releases = await fetch_activity("hugoh", [REPO_A], SINCE_RELEASE)
     assert [r["tag_name"] for r in releases] == ["v2.0.0"]
 
 
-async def test_fetch_releases_stops_paginating_once_page_is_entirely_older_than_since(
+async def test_fetch_activity_warns_on_stderr_when_has_next_page(
+    httpx2_mock: respx.Router, capsys
+):
+    _mock_graphql(httpx2_mock, _repo_data(prs=[_gql_pr()], pr_has_next=True))
+    await fetch_activity("hugoh", [REPO_A], SINCE_OPEN)
+    assert "repo-a" in capsys.readouterr().err
+
+
+async def test_fetch_activity_batches_repos_across_multiple_queries(
     httpx2_mock: respx.Router,
 ):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/releases").mock(
+    repos = [
+        Repo(name=f"repo-{i}", default_branch="main", is_private=False, is_fork=False)
+        for i in range(11)
+    ]
+    route = httpx2_mock.post(f"{API_BASE}/graphql").mock(
         return_value=httpx.Response(
-            200, json=[_release(published_at="2026-07-01T10:00:00Z")]
+            200, json={"data": {f"r{i}": _repo_data() for i in range(10)}}
         )
     )
-    await fetch_releases("hugoh", [REPO_A], SINCE_RELEASE)
-    assert len(httpx2_mock.calls) == 1
-
-
-async def test_fetch_releases_combines_multiple_repos(httpx2_mock: respx.Router):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/releases").mock(
-        return_value=httpx.Response(200, json=[_release(tag_name="v1.0.0")])
-    )
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-b/releases").mock(
-        return_value=httpx.Response(200, json=[_release(tag_name="v2.0.0")])
-    )
-    releases = await fetch_releases("hugoh", [REPO_A, REPO_B], SINCE_RELEASE)
-    assert sorted(r["tag_name"] for r in releases) == ["v1.0.0", "v2.0.0"]
-
-
-# ---------------------------------------------------------------------------
-# CI status / mergeable state (open PRs only -- closed PRs skip these two
-# extra fetches, since a closed PR's CI/conflict state isn't actionable)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("check_runs", "expected_status"),
-    [
-        (
-            [_check_run(status="in_progress", conclusion=None)],
-            "pending",
-        ),
-        (
-            [_check_run(), _check_run(conclusion="failure")],
-            "failing",
-        ),
-        ([], "no checks"),
-    ],
-    ids=["pending", "failing", "no_checks"],
-)
-async def test_fetch_prs_ci_status(
-    httpx2_mock: respx.Router, check_runs, expected_status
-):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
-        return_value=httpx.Response(200, json=[_pr(number=1)])
-    )
-    _mock_open_pr_extras(httpx2_mock, number=1, check_runs=check_runs)
-    prs = await fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
-    assert prs[0]["ci_status"] == expected_status
-
-
-async def test_fetch_prs_mergeable_conflict_when_dirty(httpx2_mock: respx.Router):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
-        return_value=httpx.Response(200, json=[_pr(number=1)])
-    )
-    _mock_open_pr_extras(httpx2_mock, number=1, mergeable_state="dirty")
-    prs = await fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
-    assert prs[0]["mergeable"] == "conflict"
-
-
-async def test_fetch_prs_mergeable_clean_when_state_unknown(httpx2_mock: respx.Router):
-    # mergeable_state can be null/"unknown" right after a push, before
-    # GitHub finishes computing it -- treated the same as clean, not
-    # flagged as a conflict.
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo-a/pulls").mock(
-        return_value=httpx.Response(200, json=[_pr(number=1)])
-    )
-    _mock_open_pr_extras(httpx2_mock, number=1, mergeable_state="unknown")
-    prs = await fetch_prs("hugoh", [REPO_A], SINCE_OPEN)
-    assert prs[0]["mergeable"] == "clean"
+    await fetch_activity("hugoh", repos, SINCE_OPEN)
+    assert route.call_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -950,93 +875,17 @@ def test_render_html_escapes_issue_title():
 
 
 # ---------------------------------------------------------------------------
-# send_email
+# CLI
 # ---------------------------------------------------------------------------
 
 
-class FakeSMTP:
-    instances: ClassVar[list] = []
-
-    def __init__(self, host, port):
-        self.host = host
-        self.port = port
-        self.calls = []
-        FakeSMTP.instances.append(self)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc_info):
-        return False
-
-    def starttls(self):
-        self.calls.append("starttls")
-
-    def login(self, user, password):
-        self.calls.append(("login", user, password))
-
-    def send_message(self, msg):
-        self.calls.append(("send_message", msg))
+def test_parser_accepts_repo_scope():
+    args = build_parser().parse_args(["repo-a", "repo-b", "--skip", "repo-c,repo-d"])
+    assert args.repos == ["repo-a", "repo-b"]
+    assert args.skip == "repo-c,repo-d"
 
 
-@pytest.fixture(autouse=True)
-def fake_smtp(monkeypatch):
-    FakeSMTP.instances = []
-    monkeypatch.setattr("smtplib.SMTP", FakeSMTP)
-    return FakeSMTP
-
-
-def test_send_email_starttls_login_and_sends(fake_smtp):
-    send_email(
-        "<html>hi</html>",
-        smtp_host="smtp.example.com",
-        smtp_port=587,
-        smtp_user="user",
-        smtp_password="pass",
-        from_addr="from@example.com",
-        to_addr="to@example.com",
-        subject="PR digest",
-    )
-    (instance,) = fake_smtp.instances
-    assert instance.host == "smtp.example.com"
-    assert instance.port == 587
-    assert instance.calls[0] == "starttls"
-    assert instance.calls[1] == ("login", "user", "pass")
-    assert instance.calls[2][0] == "send_message"
-
-
-def test_send_email_message_has_plain_and_html_parts(fake_smtp):
-    send_email(
-        "<html><body>hi</body></html>",
-        smtp_host="smtp.example.com",
-        smtp_port=587,
-        smtp_user="user",
-        smtp_password="pass",
-        from_addr="from@example.com",
-        to_addr="to@example.com",
-        subject="PR digest",
-    )
-    (instance,) = fake_smtp.instances
-    msg = instance.calls[2][1]
-    parsed = message_from_bytes(msg.as_bytes())
-    content_types = {part.get_content_type() for part in parsed.walk()}
-    assert "text/plain" in content_types
-    assert "text/html" in content_types
-
-
-def test_send_email_sets_subject_and_addresses(fake_smtp):
-    send_email(
-        "<html>hi</html>",
-        smtp_host="smtp.example.com",
-        smtp_port=587,
-        smtp_user="user",
-        smtp_password="pass",
-        from_addr="from@example.com",
-        to_addr="to@example.com",
-        subject="PR digest",
-    )
-    (instance,) = fake_smtp.instances
-    msg = instance.calls[2][1]
-    assert msg["Subject"] == "PR digest"
-    assert msg["From"] == "from@example.com"
-    assert msg["To"] == "to@example.com"
+def test_parser_repo_scope_defaults_to_everything():
+    args = build_parser().parse_args([])
+    assert args.repos == []
+    assert args.skip is None

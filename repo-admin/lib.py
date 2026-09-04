@@ -1,6 +1,6 @@
 """Shared helpers for repo-admin/*.py scripts. Not meant to be run directly.
 
-GitHub REST transport lives in the `ghapi` workspace package and the
+GitHub REST transport lives in the `asyncgh` workspace package and the
 fetch-diff-apply kernel in `reconcilekit`; this module re-exports both and
 adds repo-admin's own config-file loading, repo filtering, and sops glue.
 """
@@ -19,7 +19,7 @@ from typing import TypeVar
 import yaml
 from reconcilekit.render import console
 
-from ghapi import (
+from asyncgh import (
     API_BASE,
     GhError,
     aclose_client,
@@ -28,6 +28,7 @@ from ghapi import (
     encrypt_secret_value,
     error_message,
     fetch_repos_json,
+    graphql,
     paginated,
     public_repos_json,
     set_repo_secret,
@@ -46,7 +47,7 @@ from reconcilekit import (
 )
 from reconcilekit import run_parallel as _run_parallel
 
-__all__ = [  # re-exported from ghapi / reconcilekit for repo-admin's modules
+__all__ = [  # re-exported from asyncgh / reconcilekit for repo-admin's modules
     "API_BASE",
     "GhError",
     "ReconcileError",
@@ -59,6 +60,7 @@ __all__ = [  # re-exported from ghapi / reconcilekit for repo-admin's modules
     "encrypt_secret_value",
     "error_message",
     "fetch_repos_json",
+    "graphql",
     "paginated",
     "partition_fields",
     "print_status",
@@ -192,7 +194,7 @@ def default_secrets() -> dict[str, list[str]]:
 def decrypt_secrets() -> dict[str, str]:
     """Decrypts secrets.enc.yaml via `sops -d`, returning secret name ->
     value. Shells out rather than using a sops Python binding -- same
-    external-trusted-CLI style as ghapi's `gh auth token` call.
+    external-trusted-CLI style as asyncgh's `gh auth token` call.
     """
     if not SECRETS_ENC_FILE.exists():
         raise GhError(
