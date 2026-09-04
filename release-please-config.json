@@ -3,15 +3,18 @@
   "packages": {
     "asyncgh": {
       "release-type": "python",
-      "component": "asyncgh"
+      "component": "asyncgh",
+      "skip-changelog": true
     },
     "reconcilekit": {
       "release-type": "python",
-      "component": "reconcilekit"
+      "component": "reconcilekit",
+      "skip-changelog": true
     },
     "repokit": {
       "release-type": "python",
-      "component": "repokit"
+      "component": "repokit",
+      "skip-changelog": true
     }
   }
 }
