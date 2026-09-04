@@ -10,8 +10,8 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Generic, Protocol, TypeVar
 
-from .render import QUIET_STATUSES, console, print_status, progress_bar
-from .status import Status
+from .render import console, print_status, progress_bar
+from .status import QUIET_STATUSES, Status
 
 DEFAULT_JOBS = 6
 
@@ -25,11 +25,20 @@ class ReconcileError(RuntimeError):
 
 
 class HasName(Protocol):
+    """The minimal shape `run_parallel` needs from a target: something to
+    label progress lines and failure messages with.
+    """
+
     @property
     def name(self) -> str: ...
 
 
 class ResultLike(Protocol):
+    """The minimal shape `run_parallel` needs from a worker's return value --
+    `Result` satisfies this, but a caller can return its own type instead as
+    long as it carries these two fields.
+    """
+
     status: Status
     line: str
 
@@ -41,6 +50,11 @@ R = TypeVar("R", bound=ResultLike)
 
 @dataclass
 class Result(Generic[Target]):
+    """A worker's return value: `target` and `line` for reporting, `status`
+    for classification/suppression, and an optional `tag` for a caller's own
+    end-of-run bookkeeping (distinct from `status`, which is exit-code plumbing).
+    """
+
     target: Target
     line: str
     status: Status = Status.OK
@@ -67,9 +81,9 @@ async def run_reconcile(
 async def run_parallel(
     targets: Sequence[Target],
     worker: Callable[[Target], Awaitable[R]],
+    *,
     jobs: int = DEFAULT_JOBS,
     verbose: bool = False,
-    *,
     error_cls: type[Exception] = ReconcileError,
 ) -> list[R]:
     """Runs worker(target) for each target concurrently (bounded by a semaphore
@@ -82,13 +96,18 @@ async def run_parallel(
     (TaskGroup cancels every sibling task the moment any task raises). Instead
     it's printed as a failure line and collected; once every target has been
     attempted, any failures are raised together as a single `error_cls` so the
-    run still ends with a nonzero exit.
+    run still ends with a nonzero exit. `error_cls` must be constructible from
+    a single positional `str` -- the type hint (`type[Exception]`) doesn't
+    capture that narrower contract, but the call below relies on it.
 
     Unless verbose=True, a target already at its target state (UNCHANGED /
     LIMITED_UNCHANGED) isn't printed live -- on a large fleet the handful of
     lines that represent an actual change would otherwise be lost in a wall of
     "unchanged: ..." lines. Suppressed lines are counted and reported as a
     single dim summary line instead.
+
+    `jobs`/`verbose`/`error_cls` are keyword-only so a bare positional bool at
+    a call site can't be misread as one or the other.
     """
     results: list[R] = []
     failed_names: list[str] = []

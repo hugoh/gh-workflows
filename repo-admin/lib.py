@@ -14,7 +14,7 @@ import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeVar
+from typing import TypeVar, cast
 
 import yaml
 from reconcilekit.render import console
@@ -24,13 +24,13 @@ from asyncgh import (
     GhError,
     aclose_client,
     api_json,
-    api_request,
+    api_raw,
     encrypt_secret_value,
     error_message,
-    fetch_repos_json,
+    fetch_repos,
     graphql,
     paginated,
-    public_repos_json,
+    public_repos,
     set_repo_secret,
 )
 from reconcilekit import (
@@ -54,18 +54,18 @@ __all__ = [  # re-exported from asyncgh / reconcilekit for repo-admin's modules
     "Status",
     "aclose_client",
     "api_json",
-    "api_request",
+    "api_raw",
     "classify_status",
     "console",
     "encrypt_secret_value",
     "error_message",
-    "fetch_repos_json",
+    "fetch_repos",
     "graphql",
     "paginated",
     "partition_fields",
     "print_status",
     "progress_bar",
-    "public_repos_json",
+    "public_repos",
     "result_line",
     "run_cli",
     "run_reconcile",
@@ -316,7 +316,9 @@ async def list_repos(
 ) -> list[Repo]:
     if include_forks is None:
         include_forks = default_include_forks()
-    repos_json = await fetch_repos_json(owner)
+    # RepoJSON (a TypedDict) isn't assignable to plain dict per ty -- these
+    # helpers work on repo JSON generically, not asyncgh's specific shape.
+    repos_json = cast("list[dict]", await fetch_repos(owner))
     for name in sorted(unmatched_include_forks(include_forks, repos_json)):
         print(
             f"warning: include-forks entry {name!r} doesn't match any repo",
@@ -332,10 +334,12 @@ def as_set(value: str | None) -> set[str] | None:
 
 
 async def run_parallel(
-    repos: list[Repo], worker, jobs: int = DEFAULT_JOBS, verbose: bool = False
+    repos: list[Repo], worker, *, jobs: int = DEFAULT_JOBS, verbose: bool = False
 ) -> list[RepoResult]:
     """reconcilekit.run_parallel with repo-admin's failure exception type bound
     (so callers keep catching GhError). See reconcilekit.kernel for the
     concurrency, failure-isolation, and quiet-suppression behaviour.
     """
-    return await _run_parallel(repos, worker, jobs, verbose, error_cls=GhError)
+    return await _run_parallel(
+        repos, worker, jobs=jobs, verbose=verbose, error_cls=GhError
+    )

@@ -21,8 +21,6 @@ _STATUS_DISPLAY: dict[Status, tuple[str, str]] = {
     Status.FAILED: ("✗", "red"),
 }
 
-QUIET_STATUSES = (Status.UNCHANGED, Status.LIMITED_UNCHANGED)
-
 
 def progress_bar(*, console: Console = console, **kwargs: Any) -> Progress:
     """A Progress bound to `console` (module-level `console` by default),
@@ -34,6 +32,11 @@ def progress_bar(*, console: Console = console, **kwargs: Any) -> Progress:
 
 
 def result_line(name: str, detail: str, status: Status) -> str:
+    """Formats one target's result line: name padded for alignment, an
+    "unchanged: " prefix for the two quiet statuses so a suppressed line
+    still reads correctly if a caller prints it anyway (e.g. --verbose),
+    then the worker's own detail text.
+    """
     prefix = (
         "unchanged: " if status in (Status.UNCHANGED, Status.LIMITED_UNCHANGED) else ""
     )
@@ -41,14 +44,20 @@ def result_line(name: str, detail: str, status: Status) -> str:
 
 
 def print_status(status: Status, line: str) -> None:
-    # Always goes through the single Console that Progress/Live owns
-    # (run_parallel passes it to Progress(console=...)): a second Console
-    # writing to a separate stream isn't coordinated by rich's Live redraw
-    # bookkeeping and can visually corrupt output on a real terminal.
+    """Prints one result line through the shared `console`, color-coded and
+    symbol-prefixed by `status`.
+
+    Always goes through the single module-level `console` -- the same one
+    `run_parallel` passes to `Progress(console=...)` -- rather than a
+    Console of the caller's own: a second Console writing to a separate
+    stream isn't coordinated by rich's Live redraw bookkeeping and can
+    visually corrupt output on a real terminal.
+
+    `markup=False`: `line` can contain target/error text with a literal "["
+    (dict reprs, error messages) that would otherwise be parsed as rich
+    markup. `highlight=False`: rich's default ReprHighlighter recolors
+    numbers, paths, etc. within the line (e.g. a target named "foo-410"),
+    fighting with the single status color wanted for the whole line.
+    """
     symbol, color = _STATUS_DISPLAY[status]
-    # markup=False: `line` can contain target/error text with literal "[" (dict
-    # reprs, error messages) that would otherwise be parsed as rich markup.
-    # highlight=False: rich's default ReprHighlighter recolors numbers, paths,
-    # etc. within the line (e.g. a target named "foo-410"), fighting with the
-    # single status color we want for the whole line.
     console.print(f"{symbol} {line}", style=color, markup=False, highlight=False)
