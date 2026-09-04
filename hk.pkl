@@ -29,6 +29,12 @@ local linters = new Mapping<String, Step> {
         profiles = List("ci")
         depends = List("uv-sync")
     }
+    ["repokit-pytest"] = {
+        dir = "repokit"
+        check = "uv run pytest"
+        profiles = List("ci")
+        depends = List("uv-sync")
+    }
     ["ty"] {
         depends = List("uv-sync")
     }

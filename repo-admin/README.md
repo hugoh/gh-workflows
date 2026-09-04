@@ -11,7 +11,11 @@ from the `.py` source. The stateless fetch-diff-apply reconcile loop each
 [`reconcilekit/`](../reconcilekit/README.md), a domain-agnostic uv-workspace
 package; the GitHub REST + GraphQL transport (`api_json` / `graphql` /
 pagination / auth via `gh`) lives in a second one,
-[`asyncgh/`](../asyncgh/README.md). Forks are excluded by default — except
+[`asyncgh/`](../asyncgh/README.md); repo listing/filtering and CLI-entrypoint
+plumbing (`list_repos` / `filter_repos` / `run_cli`) live in a third,
+[`repokit/`](../repokit/README.md) — `lib.py` layers this repo's own
+config-file loading, sops glue, and fork/exclude policy on top of all
+three. Forks are excluded by default — except
 those listed in `config/include-forks.txt`; edit that file to add more, or
 override per-run with `GH_INCLUDE_FORKS` (comma-separated). Every subcommand
 accepts trailing repo names to scope to a subset (default: every repo) and
@@ -119,25 +123,12 @@ Run a mutating command with `--dry-run` first and review the output before
 applying; by default only changed/failed repos print live, with unchanged
 ones counted in a summary line — pass `--verbose` to see every repo.
 
-## `digest.py` — activity digest
-
-Builds an HTML digest of an account's repo activity — still-open PRs and
-issues, releases, and recently closed PRs and issues — fetched via GraphQL,
-and optionally emails it through an SMTP relay. `email_delivery.py` (`gh
-auth token`, `send_email` / `send_email_from_env`) is split out from the
-fetch/render logic so delivery can vary independently — that split is what
-makes [`../digest-action/`](../digest-action/README.md), the reusable GitHub
-Action wrapping this script, possible.
-
-```text
-cd repo-admin
-uv run digest.py [repo ...] [--skip name1,name2] [--open-days 365]
-  [--release-days 7] [--closed-days 7] [--out FILE] [--no-send]
-```
-
-Same trailing-repo-names / `--skip` scoping as `repo_admin.py`. Reads SMTP
-settings and the recipient from the environment: `SMTP_HOST`, `SMTP_PORT`,
-`SMTP_USERNAME`, `SMTP_PASSWORD`, `DIGEST_FROM_EMAIL`, `DIGEST_TO_EMAIL`.
+The account-activity digest (still-open/closed PRs and issues, releases)
+used to live here as `digest.py`, wrapped by a local `digest-action/`
+composite Action. It's now [`hugoh/digest-action`](https://github.com/hugoh/digest-action),
+a standalone repo — GitHub Marketplace only publishes an Action from a
+repository root, so it moved out, taking `repokit` (published to PyPI) as
+its dependency instead of reaching back into this repo.
 
 ## Tests
 

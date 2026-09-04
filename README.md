@@ -21,9 +21,11 @@ can insert them in the right place.
   e.g. `level: minor` → `["0.42","0.43","0.44"]`, `level: major, count: 2` →
   `["1","2"]`. Needs `mise` on `PATH` (run `setup` first). `go-tools`'
   `go-tool-compat.yml` reusable workflow wraps this.
-- **[`digest-action`](digest-action/README.md)** — builds (and optionally
-  emails) an HTML digest of a GitHub account's repo activity. Self-contained
-  (installs its own `uv`); see its README for inputs, outputs, and usage.
+- **[`hugoh/digest-action`](https://github.com/hugoh/digest-action)** —
+  builds (and optionally emails) an HTML digest of a GitHub account's repo
+  activity. A separate repo (not part of this one) since GitHub Marketplace
+  only publishes an Action from a repository root; depends on this repo's
+  `repokit`/`asyncgh` PyPI packages.
 
 ## Usage
 
@@ -81,8 +83,9 @@ jobs:
         id: bumps
 ```
 
-Emailing a weekly digest — see [`digest-action/README.md`](digest-action/README.md)
-for the full input reference.
+Emailing a weekly digest — see
+[`hugoh/digest-action`](https://github.com/hugoh/digest-action)'s README for
+the full input reference.
 
 ## Why two actions instead of one reusable workflow
 
@@ -99,8 +102,12 @@ This repo also hosts a uv workspace of Python packages behind `repo-admin`'s
 scripts, each with its own README:
 
 - **[`repo-admin/`](repo-admin/README.md)** — bulk repo settings and the
-  activity digest; the actual CLI tools
+  account-activity CLI tool
 - **[`asyncgh/`](asyncgh/README.md)** — the GitHub REST + GraphQL transport
   (auth, retry, pagination) they share
 - **[`reconcilekit/`](reconcilekit/README.md)** — the domain-agnostic
   fetch-diff-apply reconcile kernel `repo-admin`'s `sync` commands run on
+- **[`repokit/`](repokit/README.md)** — repo listing/filtering and
+  CLI-entrypoint plumbing, published to PyPI so
+  [`hugoh/digest-action`](https://github.com/hugoh/digest-action) (a
+  separate repo) can depend on it too

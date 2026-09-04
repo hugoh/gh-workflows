@@ -37,6 +37,11 @@ description = "Run the asyncgh test suite"
 dir = "asyncgh"
 run = "uv run pytest"
 
+[tasks."test:repokit"]
+description = "Run the repokit test suite"
+dir = "repokit"
+run = "uv run pytest"
+
 [tasks.docs]
 description = "Build API docs for every documented package into public/"
 depends = ["docs:*"]
@@ -50,3 +55,8 @@ run = "uv run --with pdoc pdoc asyncgh --output-directory ../public/asyncgh"
 description = "Build reconcilekit's API docs"
 dir = "reconcilekit"
 run = "uv run --with pdoc pdoc reconcilekit --output-directory ../public/reconcilekit"
+
+[tasks."docs:repokit"]
+description = "Build repokit's API docs"
+dir = "repokit"
+run = "uv run --with pdoc pdoc repokit --output-directory ../public/repokit"
