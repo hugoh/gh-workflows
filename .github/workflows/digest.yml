@@ -13,10 +13,7 @@ jobs:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./digest-action
+      - uses: hugoh/digest-action@fd2dc13618bf552a485e1e63a4234ed9f504b048 # v0.1.0
         with:
           owner: hugoh
           github-token: ${{ secrets.PR_DIGEST_PAT }}
