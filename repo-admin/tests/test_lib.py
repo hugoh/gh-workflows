@@ -1,3 +1,4 @@
+import asyncio
 import subprocess
 
 import httpx
@@ -66,6 +67,19 @@ async def test_default_owner_caches_the_resolved_value(
     )
     await lib.default_owner()
     await lib.default_owner()
+    assert route.call_count == 1
+
+
+async def test_default_owner_concurrent_callers_share_one_request(
+    monkeypatch, httpx2_mock: respx.Router
+):
+    monkeypatch.delenv("GH_OWNER", raising=False)
+    monkeypatch.setattr("asyncgh.client._auth_token", lambda: "fake-token")
+    route = httpx2_mock.get(f"{API_BASE}/user").mock(
+        return_value=httpx.Response(200, json={"login": "authenticated-user"})
+    )
+    results = await asyncio.gather(*(lib.default_owner() for _ in range(5)))
+    assert results == ["authenticated-user"] * 5
     assert route.call_count == 1
 
 
