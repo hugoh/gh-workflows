@@ -10,14 +10,17 @@ on: # yamllint disable-line rule:truthy
     paths:
       - repokit/**
       - .github/workflows/release-repokit.yml
-      - .github/workflows/release-pypi.yml
+      - release-pypi/action.yml
 
 jobs:
   publish:
-    uses: ./.github/workflows/release-pypi.yml
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    environment: pypi-repokit
     permissions:
       contents: read
       id-token: write
-    with:
-      environment: pypi-repokit
-      uv-package: hugoh-repokit
+    steps:
+      - uses: ./release-pypi
+        with:
+          uv-package: hugoh-repokit

@@ -10,14 +10,17 @@ on: # yamllint disable-line rule:truthy
     paths:
       - asyncgh/**
       - .github/workflows/release-asyncgh.yml
-      - .github/workflows/release-pypi.yml
+      - release-pypi/action.yml
 
 jobs:
   publish:
-    uses: ./.github/workflows/release-pypi.yml
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    environment: pypi-asyncgh
     permissions:
       contents: read
       id-token: write
-    with:
-      environment: pypi-asyncgh
-      uv-package: asyncgh
+    steps:
+      - uses: ./release-pypi
+        with:
+          uv-package: asyncgh
