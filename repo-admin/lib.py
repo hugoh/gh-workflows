@@ -48,7 +48,6 @@ from reconcilekit import (
 )
 from repokit import (
     DEFAULT_JOBS,
-    DEFAULT_OWNER,
     Repo,
     RepoResult,
     as_set,
@@ -57,10 +56,25 @@ from repokit import (
     run_parallel,
 )
 
+_default_owner: str | None = None
+
+
+async def default_owner() -> str:
+    """The account to operate on: GH_OWNER if set, otherwise whoever the
+    current token authenticates as (`GET /user`) -- cached since it's the
+    same account for the life of one invocation.
+    """
+    global _default_owner
+    if _default_owner is None:
+        _default_owner = (
+            os.environ.get("GH_OWNER") or (await api_json("GET", "/user"))["login"]
+        )
+    return _default_owner
+
+
 __all__ = [  # re-exported from asyncgh / reconcilekit / repokit for repo-admin's modules
     "API_BASE",
     "DEFAULT_JOBS",
-    "DEFAULT_OWNER",
     "GhError",
     "ReconcileError",
     "Repo",
@@ -72,6 +86,7 @@ __all__ = [  # re-exported from asyncgh / reconcilekit / repokit for repo-admin'
     "as_set",
     "classify_status",
     "console",
+    "default_owner",
     "encrypt_secret_value",
     "error_message",
     "fetch_repos",
@@ -249,18 +264,21 @@ def edit_secrets_file() -> int:
 
 
 async def list_repos(
-    owner: str = DEFAULT_OWNER,
+    owner: str | None = None,
     *,
     only: set[str] | None = None,
     skip: set[str] | None = None,
     include_forks: set[str] | None = None,
 ) -> list[Repo]:
-    """repokit.filter_repos over a fresh fetch, defaulting include_forks to
-    default_include_forks() (config/include-forks.txt, or GH_INCLUDE_FORKS)
-    when the caller doesn't pass one -- repokit itself has no file-backed
-    default, since that's repo-admin-specific policy. Warns (once, using
-    this same fetch) about any include-forks entry matching no repo.
+    """repokit.filter_repos over a fresh fetch, defaulting owner to
+    default_owner() and include_forks to default_include_forks()
+    (config/include-forks.txt, or GH_INCLUDE_FORKS) when the caller doesn't
+    pass one -- repokit itself has no file-backed default, since that's
+    repo-admin-specific policy. Warns (once, using this same fetch) about
+    any include-forks entry matching no repo.
     """
+    if owner is None:
+        owner = await default_owner()
     if include_forks is None:
         include_forks = default_include_forks()
     # RepoJSON (a TypedDict) isn't assignable to plain dict per ty -- these

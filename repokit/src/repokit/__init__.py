@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from .core import (
     DEFAULT_JOBS,
-    DEFAULT_OWNER,
     Repo,
     RepoResult,
     as_set,
@@ -26,7 +25,6 @@ from .email import send_email, send_email_from_env
 
 __all__ = [
     "DEFAULT_JOBS",
-    "DEFAULT_OWNER",
     "Repo",
     "RepoResult",
     "as_set",

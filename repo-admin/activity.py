@@ -16,11 +16,11 @@ from datetime import UTC, datetime, timedelta
 import lib
 from lib import (
     DEFAULT_JOBS,
-    DEFAULT_OWNER,
     GhError,
     Repo,
     api_json,
     api_raw,
+    default_owner,
     error_message,
     list_repos,
     public_repos,
@@ -196,17 +196,16 @@ async def run(args: argparse.Namespace) -> int:
     since = now - timedelta(days=args.window_months * _MONTH_DAYS)
 
     author = (await api_json("GET", "/user"))["login"]
+    owner = await default_owner()
     all_repos, public_repos_json = await asyncio.gather(
-        list_repos(DEFAULT_OWNER),
-        public_repos(DEFAULT_OWNER),
+        list_repos(owner),
+        public_repos(owner),
     )
     public_names = {entry["name"] for entry in public_repos_json}
     public_repo_objs = [r for r in all_repos if r.name in public_names]
 
     sem = asyncio.Semaphore(DEFAULT_JOBS)
-    commit_dates = await fetch_commit_dates(
-        DEFAULT_OWNER, all_repos, author, since, sem=sem
-    )
+    commit_dates = await fetch_commit_dates(owner, all_repos, author, since, sem=sem)
 
     all_rows = build_rows(all_repos, commit_dates, now, args.half_life_days)
     public_rows = build_rows(public_repo_objs, commit_dates, now, args.half_life_days)

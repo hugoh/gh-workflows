@@ -37,8 +37,9 @@ Every `<resource> <verb>` accepts trailing repo names to scope to a subset
 (default: every repo); `--skip name1,name2` excludes instead. Forks are
 excluded by default -- except those listed in config/include-forks.txt; edit
 that file to add more, or override per-run with GH_INCLUDE_FORKS
-(comma-separated). GH_OWNER overrides the default owner (hugoh); GH_JOBS
-controls parallelism (default 6). Run a mutating command with --dry-run
+(comma-separated). GH_OWNER overrides the default owner (the authenticated
+account); GH_JOBS controls parallelism (default 6). Run a mutating command
+with --dry-run
 first and review the output; `--verbose` shows every repo, not just the
 ones that changed.
 """
@@ -56,7 +57,6 @@ import lib
 import yaml
 from lib import (
     DEFAULT_JOBS,
-    DEFAULT_OWNER,
     GhError,
     Repo,
     RepoResult,
@@ -66,6 +66,7 @@ from lib import (
     as_set,
     classify_status,
     default_branch_protection_exclude,
+    default_owner,
     error_message,
     list_repos,
     partition_fields,
@@ -95,7 +96,9 @@ async def list_repos_for_args(
     skip = as_set(args.skip) or set()
     if extra_skip:
         skip |= extra_skip
-    return await list_repos(DEFAULT_OWNER, only=set(args.repos) or None, skip=skip)
+    return await list_repos(
+        await default_owner(), only=set(args.repos) or None, skip=skip
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +234,7 @@ async def cmd_merge_sync(args: argparse.Namespace) -> int:
     repos = await list_repos_for_args(args)
     await run_parallel(
         repos,
-        make_merge_settings_worker(DEFAULT_OWNER, args.dry_run),
+        make_merge_settings_worker(await default_owner(), args.dry_run),
         verbose=args.verbose,
     )
     return 0
@@ -431,7 +434,7 @@ async def cmd_security_sync(args: argparse.Namespace) -> int:
     repos = await list_repos_for_args(args)
     results = await run_parallel(
         repos,
-        make_security_features_worker(DEFAULT_OWNER, args.dry_run),
+        make_security_features_worker(await default_owner(), args.dry_run),
         verbose=args.verbose,
     )
 
@@ -773,7 +776,7 @@ async def cmd_protection_sync(args: argparse.Namespace) -> int:
     results = await run_parallel(
         repos,
         make_branch_protection_worker(
-            DEFAULT_OWNER,
+            await default_owner(),
             args.dry_run,
             clear_stale_checks=getattr(args, "clear_stale_checks", False),
         ),
@@ -978,10 +981,10 @@ async def cmd_pages_sync(args: argparse.Namespace) -> int:
     else:
         only = set(domains)
 
-    repos = await list_repos(DEFAULT_OWNER, only=only, skip=as_set(args.skip))
+    repos = await list_repos(await default_owner(), only=only, skip=as_set(args.skip))
     await run_parallel(
         repos,
-        make_pages_domain_worker(DEFAULT_OWNER, args.dry_run, domains),
+        make_pages_domain_worker(await default_owner(), args.dry_run, domains),
         verbose=args.verbose,
     )
     return 0
@@ -1013,7 +1016,7 @@ async def _pages_enabled_repos(repos: list[Repo]) -> list[tuple[Repo, dict]]:
 
     async def fetch_one(repo: Repo) -> tuple[Repo, dict | None]:
         async with sem:
-            return repo, await _fetch_pages_config(DEFAULT_OWNER, repo.name)
+            return repo, await _fetch_pages_config(await default_owner(), repo.name)
 
     with lib.progress_bar() as progress:
         task = progress.add_task("Fetching Pages config...", total=len(repos))
@@ -1093,7 +1096,9 @@ async def cmd_pages_config(args: argparse.Namespace) -> int:
     if only:
         names = sorted(only)
     else:
-        repos = await list_repos(DEFAULT_OWNER, only=None, skip=as_set(args.skip))
+        repos = await list_repos(
+            await default_owner(), only=None, skip=as_set(args.skip)
+        )
         enabled = await _pages_enabled_repos(repos)
         domains = lib.default_pages_domains()
         names = sorted(
@@ -1183,12 +1188,12 @@ async def cmd_secrets_sync(args: argparse.Namespace) -> int:
             continue
 
         print(f"== {secret_name} ==")
-        repos = await list_repos(DEFAULT_OWNER, only=target_repos)
+        repos = await list_repos(await default_owner(), only=target_repos)
         try:
             await run_parallel(
                 repos,
                 make_secrets_sync_worker(
-                    DEFAULT_OWNER,
+                    await default_owner(),
                     args.dry_run,
                     secret_name,
                     values.get(secret_name, ""),

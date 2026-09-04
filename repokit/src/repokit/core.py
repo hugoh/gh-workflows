@@ -23,7 +23,6 @@ from asyncgh import GhError, aclose_client, fetch_repos
 from reconcilekit import Status
 from reconcilekit import run_parallel as _run_parallel
 
-DEFAULT_OWNER = os.environ.get("GH_OWNER", "hugoh")
 DEFAULT_JOBS = int(os.environ.get("GH_JOBS", "6"))
 
 _Args = TypeVar("_Args")
@@ -91,7 +90,7 @@ def filter_repos(
 
 
 async def list_repos(
-    owner: str = DEFAULT_OWNER,
+    owner: str,
     *,
     only: set[str] | None = None,
     skip: set[str] | None = None,
