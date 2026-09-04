@@ -22,9 +22,10 @@ class _PresentPath:
 def _capturing_list_repos():
     seen = {}
 
-    async def fake_list_repos(owner, *, only=None, skip=None):
+    async def fake_list_repos(owner, *, only=None, skip=None, require_only_match=False):
         seen["only"] = only
         seen["skip"] = skip
+        seen["require_only_match"] = require_only_match
         return []
 
     return seen, fake_list_repos
@@ -36,7 +37,7 @@ def _capturing_list_repos():
 
 
 async def test_cmd_repos_list_prints_a_row_per_repo(monkeypatch, capsys):
-    async def fake_list_repos(owner, *, only=None, skip=None):
+    async def fake_list_repos(owner, *, only=None, skip=None, require_only_match=False):
         return [
             Repo(name="repo-a", default_branch="main", is_private=False, is_fork=False),
             Repo(name="repo-b", default_branch="master", is_private=True, is_fork=True),
@@ -57,7 +58,19 @@ async def test_cmd_repos_list_passes_through_repos_and_skip_filters(monkeypatch)
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
     args = argparse.Namespace(repos=["repo-a"], skip="repo-b")
     await repo_admin.cmd_repos_list(args)
-    assert seen == {"only": {"repo-a"}, "skip": {"repo-b"}}
+    assert seen == {
+        "only": {"repo-a"},
+        "skip": {"repo-b"},
+        "require_only_match": True,
+    }
+
+
+async def test_cmd_repos_list_does_not_require_a_match_with_no_repo_args(monkeypatch):
+    seen, fake_list_repos = _capturing_list_repos()
+    monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
+    args = argparse.Namespace(repos=[], skip=None)
+    await repo_admin.cmd_repos_list(args)
+    assert seen["require_only_match"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -1055,7 +1068,7 @@ async def test_cmd_protection_sync_excludes_even_without_explicit_skip(monkeypat
 async def test_cmd_protection_sync_passes_verbose_to_run_parallel(monkeypatch):
     seen = {}
 
-    async def fake_list_repos(owner, *, only=None, skip=None):
+    async def fake_list_repos(owner, *, only=None, skip=None, require_only_match=False):
         return [REPO]
 
     async def fake_run_parallel(repos, worker, *, verbose=False, jobs=None):
@@ -1398,7 +1411,11 @@ async def test_cmd_pages_sync_defaults_to_mapped_repos(monkeypatch):
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
     args = argparse.Namespace(dry_run=True, repos=[], skip=None, verbose=False)
     assert await repo_admin.cmd_pages_sync(args) == 0
-    assert seen == {"only": {"awesome-jj"}, "skip": None}
+    assert seen == {
+        "only": {"awesome-jj"},
+        "skip": None,
+        "require_only_match": False,
+    }
 
 
 async def test_cmd_pages_sync_errors_on_unmapped_repo(monkeypatch, capsys):
@@ -1440,7 +1457,7 @@ async def test_cmd_pages_status_lists_enabled_repos_and_flags_unmapped(
         name="no-pages", default_branch="main", is_private=False, is_fork=False
     )
 
-    async def fake_list_repos(owner, *, only=None, skip=None):
+    async def fake_list_repos(owner, *, only=None, skip=None, require_only_match=False):
         return [mapped_repo, unmapped_repo, disabled_repo]
 
     pages_configs = {
@@ -1539,7 +1556,7 @@ async def test_cmd_pages_config_auto_discovers_unmapped_enabled_repos(
         is_fork=False,
     )
 
-    async def fake_list_repos(owner, *, only=None, skip=None):
+    async def fake_list_repos(owner, *, only=None, skip=None, require_only_match=False):
         return [mapped_repo, unmapped_repo]
 
     async def fake_pages_enabled_repos(repos):
@@ -1617,7 +1634,7 @@ async def test_secrets_sync_worker_apply_calls_set_repo_secret(monkeypatch):
 def _recording_list_repos():
     seen_only = []
 
-    async def fake_list_repos(owner, *, only=None, skip=None):
+    async def fake_list_repos(owner, *, only=None, skip=None, require_only_match=False):
         seen_only.append(only)
         return []
 
@@ -1648,7 +1665,7 @@ async def test_cmd_secrets_sync_skips_secret_when_filters_leave_no_repos(monkeyp
     )
     monkeypatch.setattr(repo_admin.lib, "decrypt_secrets", lambda: {"NAME_A": "va"})
 
-    async def fake_list_repos(owner, *, only=None, skip=None):
+    async def fake_list_repos(owner, *, only=None, skip=None, require_only_match=False):
         raise AssertionError(
             "must not call list_repos when the target repo set is empty"
         )
@@ -1727,7 +1744,7 @@ async def test_cmd_secrets_sync_dry_run_never_calls_decrypt_secrets(monkeypatch)
 
     monkeypatch.setattr(repo_admin.lib, "decrypt_secrets", fail_decrypt_secrets)
 
-    async def fake_list_repos(owner, *, only=None, skip=None):
+    async def fake_list_repos(owner, *, only=None, skip=None, require_only_match=False):
         return []
 
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)

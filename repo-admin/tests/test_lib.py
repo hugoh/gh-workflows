@@ -41,6 +41,58 @@ def test_unmatched_include_forks_empty_for_no_include_forks():
     assert unmatched_include_forks(set(), REPOS_JSON) == set()
 
 
+async def test_list_repos_raises_gh_error_for_unmatched_explicit_repo(
+    monkeypatch, httpx2_mock: respx.Router
+):
+    monkeypatch.setattr("asyncgh.client._auth_token", lambda: "fake-token")
+    httpx2_mock.get(f"{API_BASE}/user").mock(
+        return_value=httpx.Response(200, json={"login": "someone-else"})
+    )
+    httpx2_mock.get(f"{API_BASE}/users/hugoh/repos").mock(
+        return_value=httpx.Response(200, json=REPOS_JSON)
+    )
+    with pytest.raises(GhError, match="typo-repo"):
+        await lib.list_repos(
+            "hugoh", only={"public-repo", "typo-repo"}, require_only_match=True
+        )
+
+
+async def test_list_repos_does_not_raise_when_require_only_match_is_false(
+    monkeypatch, httpx2_mock: respx.Router
+):
+    monkeypatch.setattr("asyncgh.client._auth_token", lambda: "fake-token")
+    httpx2_mock.get(f"{API_BASE}/user").mock(
+        return_value=httpx.Response(200, json={"login": "someone-else"})
+    )
+    httpx2_mock.get(f"{API_BASE}/users/hugoh/repos").mock(
+        return_value=httpx.Response(200, json=REPOS_JSON)
+    )
+    repos = await lib.list_repos("hugoh", only={"public-repo", "typo-repo"})
+    assert [r.name for r in repos] == ["public-repo"]
+
+
+async def test_list_repos_does_not_raise_when_explicit_repo_is_only_excluded_by_skip(
+    monkeypatch, httpx2_mock: respx.Router
+):
+    # A real repo named explicitly but also excluded via `skip` (e.g.
+    # branch-protection-exclude.txt) isn't a typo -- require_only_match
+    # checks against every fetched repo name, before skip is applied.
+    monkeypatch.setattr("asyncgh.client._auth_token", lambda: "fake-token")
+    httpx2_mock.get(f"{API_BASE}/user").mock(
+        return_value=httpx.Response(200, json={"login": "someone-else"})
+    )
+    httpx2_mock.get(f"{API_BASE}/users/hugoh/repos").mock(
+        return_value=httpx.Response(200, json=REPOS_JSON)
+    )
+    repos = await lib.list_repos(
+        "hugoh",
+        only={"public-repo"},
+        skip={"public-repo"},
+        require_only_match=True,
+    )
+    assert repos == []
+
+
 async def test_default_owner_uses_gh_owner_env_without_a_network_call(monkeypatch):
     monkeypatch.setenv("GH_OWNER", "env-owner")
     assert await lib.default_owner() == "env-owner"
