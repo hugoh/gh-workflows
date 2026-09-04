@@ -557,8 +557,8 @@ def test_render_html_splits_open_and_closed_sections():
     )
     open_idx = html.index("Open one")
     closed_idx = html.index("Closed one")
-    open_section_idx = html.index("Open")
-    closed_section_idx = html.index("Closed", open_section_idx)
+    open_section_idx = html.index("Open (")
+    closed_section_idx = html.index("Closed (", open_section_idx)
     assert open_section_idx < open_idx < closed_section_idx < closed_idx
 
 
@@ -660,6 +660,16 @@ def test_render_html_section_headers_show_each_windows_own_date_range():
     assert "2026-07-10" in html  # since_open
     assert "2026-07-17" in html  # since_closed
     assert "2026-07-24" in html  # until, shared
+
+
+def test_render_html_shows_cutoff_summary_with_day_counts_and_dates():
+    # top-of-email summary so the windows are legible without reading every
+    # section header's own "(since to until)" range.
+    html = render_html([], [], [], SINCE_OPEN, SINCE_CLOSED, SINCE_RELEASE, UNTIL)
+    assert "14 days" in html  # until - since_open
+    assert "7 days" in html  # until - since_closed / since_release
+    assert "2026-07-10" in html
+    assert "2026-07-17" in html
 
 
 def test_render_html_shows_ci_status_and_mergeable_for_open_prs():

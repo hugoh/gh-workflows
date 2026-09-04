@@ -4,7 +4,7 @@ PRs and issues closed in the last M days -- in separate sections, and emails
 it via an smtp2go SMTP relay. Renovate's "Dependency Dashboard" issues are
 filtered out as noise.
 
-Usage: digest.py [--open-days 14] [--release-days 7] [--closed-days 7]
+Usage: digest.py [--open-days 365] [--release-days 7] [--closed-days 7]
     [--out FILE] [--no-send]
 
 Reads SMTP settings and the recipient from the environment: SMTP_HOST,
@@ -521,8 +521,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--open-days",
         type=int,
-        default=14,
-        help="how many days back to look for still-open PRs (default 14)",
+        default=365,
+        help="how many days back to look for still-open PRs and issues (default 365)",
     )
     parser.add_argument(
         "--closed-days",

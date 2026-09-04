@@ -8,6 +8,7 @@ h2 { font-size: 1.05em; margin-top: 1.5em; }
 table { border-collapse: collapse; width: 100%; }
 td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid #ddd; font-size: 0.9em; }
 .empty { color: #666; font-style: italic; }
+.meta { color: #666; font-size: 0.85em; }
 .status-passing, .mergeable-clean { color: #1a7f37; font-weight: 600; }
 .status-failing, .mergeable-conflict { color: #cf222e; font-weight: 600; }
 .status-pending { color: #9a6700; font-weight: 600; }
@@ -18,6 +19,11 @@ td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid #ddd; font
 </head>
 <body>
 <h1>GitHub digest</h1>
+<p class="meta">
+Open PRs/issues: opened in the last {{ (until - since_open).days }} days (since {{ since_open.strftime("%Y-%m-%d") }})<br>
+Closed PRs/issues: closed in the last {{ (until - since_closed).days }} days (since {{ since_closed.strftime("%Y-%m-%d") }})<br>
+Releases: published in the last {{ (until - since_release).days }} days (since {{ since_release.strftime("%Y-%m-%d") }})
+</p>
 {% macro section(title, since, until, prs, show_status, show_ci) %}
 <h2>{{ title }} ({{ prs|length }}) ({{ since.strftime("%Y-%m-%d") }} to {{ until.strftime("%Y-%m-%d") }})</h2>
 {% if not prs %}
