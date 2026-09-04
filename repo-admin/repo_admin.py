@@ -1388,20 +1388,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-async def _run(args: argparse.Namespace) -> int:
-    try:
-        return await args.func(args)
-    finally:
-        await lib.aclose_client()
-
-
 def main(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
-    try:
-        return asyncio.run(_run(args))
-    except GhError as exc:
-        print(exc, file=sys.stderr)
-        return 1
+    return lib.run_cli(args.func, args)
 
 
 if __name__ == "__main__":

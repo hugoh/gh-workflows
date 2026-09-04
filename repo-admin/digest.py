@@ -580,19 +580,8 @@ async def _main_async(args: argparse.Namespace) -> int:
 
 def main(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
-
-    async def _run() -> int:
-        try:
-            return await _main_async(args)
-        finally:
-            await lib.aclose_client()
-
-    return asyncio.run(_run())
+    return lib.run_cli(_main_async, args)
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except GhError as exc:
-        print(exc, file=sys.stderr)
-        sys.exit(1)
+    sys.exit(main(sys.argv[1:]))

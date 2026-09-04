@@ -23,6 +23,12 @@ local linters = new Mapping<String, Step> {
         profiles = List("ci")
         depends = List("uv-sync")
     }
+    ["ghapi-pytest"] = {
+        dir = "ghapi"
+        check = "uv run pytest"
+        profiles = List("ci")
+        depends = List("uv-sync")
+    }
     ["ty"] {
         depends = List("uv-sync")
     }

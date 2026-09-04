@@ -17,3 +17,22 @@ biome = "2.5.10"
 ruff = "0.16.5"
 ty = "0.0.75"
 sops = "3.13.3"
+
+[tasks.test]
+description = "Run every Python test suite"
+depends = ["test:*"]
+
+[tasks."test:repo-admin"]
+description = "Run the repo-admin test suite"
+dir = "repo-admin"
+run = "uv run pytest"
+
+[tasks."test:reconcilekit"]
+description = "Run the reconcilekit test suite"
+dir = "reconcilekit"
+run = "uv run pytest"
+
+[tasks."test:ghapi"]
+description = "Run the ghapi test suite"
+dir = "ghapi"
+run = "uv run pytest"

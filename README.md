@@ -97,7 +97,9 @@ subcommands, `gh`/`aws`/`docker`-style; repos are processed in parallel
 (`GH_JOBS`, default 6). Config data lives under `repo-admin/config/`, separate
 from the `.py` source. The stateless fetch-diff-apply reconcile loop each
 `sync` command runs on (`run_reconcile` / `run_parallel` / `Status`) lives in
-`reconcilekit/`, a domain-agnostic uv-workspace package. Forks are excluded by
+`reconcilekit/`, a domain-agnostic uv-workspace package; the GitHub REST
+transport (`api_json` / pagination / auth via `gh`) lives in a second one,
+`ghapi/`. Forks are excluded by
 default — except those listed in
 `config/include-forks.txt`; edit that file to add more, or override per-run
 with `GH_INCLUDE_FORKS` (comma-separated). Every subcommand accepts trailing
@@ -202,4 +204,4 @@ uv run repo_admin.py <resource> <verb> [repo ...] \
 Run a mutating command with `--dry-run` first and review the output before
 applying; by default only changed/failed repos print live, with unchanged
 ones counted in a summary line — pass `--verbose` to see every repo. Tests:
-`cd repo-admin && uv run pytest`.
+`mise run test` (all workspace packages), or `cd repo-admin && uv run pytest`.

@@ -74,7 +74,7 @@ def _check_run(status="completed", conclusion="success"):
 
 @pytest.fixture(autouse=True)
 def fake_auth_token(monkeypatch):
-    monkeypatch.setattr("lib._auth_token", lambda: "fake-token")
+    monkeypatch.setattr("ghapi.client._auth_token", lambda: "fake-token")
 
 
 # ---------------------------------------------------------------------------
