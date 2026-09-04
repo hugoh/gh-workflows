@@ -1,6 +1,6 @@
 [project]
 name = "reconcilekit"
-version = "0.3.0"
+version = "0.3.1"
 description = "A tiny stateless fetch-diff-apply reconciliation kernel for fleet-wide config tools"
 readme = "README.md"
 requires-python = ">=3.11"
