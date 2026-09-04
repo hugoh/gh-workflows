@@ -1,5 +1,7 @@
 # reconcilekit
 
+[![PyPI](https://img.shields.io/pypi/v/reconcilekit)](https://pypi.org/project/reconcilekit/)
+
 A tiny, stateless fetch-diff-apply reconciliation kernel — the pattern a
 fleet-wide config tool repeats for every resource it manages, with none of the
 domain specifics.

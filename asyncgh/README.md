@@ -1,5 +1,7 @@
 # asyncgh
 
+[![PyPI](https://img.shields.io/pypi/v/asyncgh)](https://pypi.org/project/asyncgh/)
+
 A minimal async GitHub API transport — the plumbing an account-wide config
 tool needs before any of its domain logic: authentication, a connection,
 retrying error handling, REST pagination, and GraphQL.
