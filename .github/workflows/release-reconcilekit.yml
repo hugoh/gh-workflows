@@ -10,14 +10,17 @@ on: # yamllint disable-line rule:truthy
     paths:
       - reconcilekit/**
       - .github/workflows/release-reconcilekit.yml
-      - .github/workflows/release-pypi.yml
+      - release-pypi/action.yml
 
 jobs:
   publish:
-    uses: ./.github/workflows/release-pypi.yml
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    environment: pypi-reconcilekit
     permissions:
       contents: read
       id-token: write
-    with:
-      environment: pypi-reconcilekit
-      uv-package: reconcilekit
+    steps:
+      - uses: ./release-pypi
+        with:
+          uv-package: reconcilekit
