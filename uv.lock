@@ -29,7 +29,7 @@ wheels = [
 
 [[package]]
 name = "asyncgh"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "asyncgh" }
 dependencies = [
     { name = "httpx2" },
@@ -254,7 +254,7 @@ wheels = [
 
 [[package]]
 name = "hugoh-repokit"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "repokit" }
 dependencies = [
     { name = "asyncgh" },
