@@ -276,6 +276,7 @@ async def list_repos(
     only: set[str] | None = None,
     skip: set[str] | None = None,
     include_forks: set[str] | None = None,
+    require_only_match: bool = False,
 ) -> list[Repo]:
     """repokit.filter_repos over a fresh fetch, defaulting owner to
     default_owner() and include_forks to default_include_forks()
@@ -283,6 +284,13 @@ async def list_repos(
     pass one -- repokit itself has no file-backed default, since that's
     repo-admin-specific policy. Warns (once, using this same fetch) about
     any include-forks entry matching no repo.
+
+    `require_only_match=True` raises GhError if any `only` entry matches no
+    fetched repo at all (a typo or nonexistent repo name), regardless of
+    skip/archived/fork filtering -- opt-in since some callers deliberately
+    pass an `only` drawn from a config file that may list a since-removed
+    repo (e.g. cmd_pages_sync's own domains-based validation), where a hard
+    failure here would be unwelcome.
     """
     if owner is None:
         owner = await default_owner()
@@ -296,4 +304,9 @@ async def list_repos(
             f"warning: include-forks entry {name!r} doesn't match any repo",
             file=sys.stderr,
         )
+    if require_only_match and only:
+        repo_names = {entry["name"] for entry in repos_json}
+        unmatched = only - repo_names
+        if unmatched:
+            raise GhError(f"not a known repo: {', '.join(sorted(unmatched))}")
     return filter_repos(repos_json, only=only, skip=skip, include_forks=include_forks)

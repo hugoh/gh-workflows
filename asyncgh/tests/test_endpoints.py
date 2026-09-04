@@ -111,6 +111,17 @@ def _sealed_box_key() -> tuple[public.PrivateKey, str]:
     return private_key, public_key_b64
 
 
+def _assert_put_body_encrypts(
+    put_route: respx.Route, private_key: public.PrivateKey, expected_value: bytes
+) -> None:
+    body = json.loads(put_route.calls[0].request.content)
+    assert body["key_id"] == "key-id-123"
+    decrypted = public.SealedBox(private_key).decrypt(
+        base64.b64decode(body["encrypted_value"])
+    )
+    assert decrypted == expected_value
+
+
 async def test_get_repo_public_key_returns_key_and_id(httpx2_mock: respx.Router):
     httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo/actions/secrets/public-key").mock(
         return_value=httpx.Response(
@@ -139,12 +150,7 @@ async def test_set_repo_secret_encrypts_and_puts_with_key_id(
     await set_repo_secret("hugoh", "repo", "NAME", "the-value")
 
     assert put_route.call_count == 1
-    body = json.loads(put_route.calls[0].request.content)
-    assert body["key_id"] == "key-id-123"
-    decrypted = public.SealedBox(private_key).decrypt(
-        base64.b64decode(body["encrypted_value"])
-    )
-    assert decrypted == b"the-value"
+    _assert_put_body_encrypts(put_route, private_key, b"the-value")
 
 
 async def test_set_repo_secret_reuses_a_passed_in_public_key(
@@ -166,9 +172,4 @@ async def test_set_repo_secret_reuses_a_passed_in_public_key(
         public_key={"key": public_key_b64, "key_id": "key-id-123"},
     )
 
-    body = json.loads(put_route.calls[0].request.content)
-    assert body["key_id"] == "key-id-123"
-    decrypted = public.SealedBox(private_key).decrypt(
-        base64.b64decode(body["encrypted_value"])
-    )
-    assert decrypted == b"the-value"
+    _assert_put_body_encrypts(put_route, private_key, b"the-value")

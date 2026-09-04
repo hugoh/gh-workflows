@@ -47,7 +47,7 @@ async def fetch_repos(
     only ever returns public repos.
     """
     client = client or _get_default_client()
-    viewer = (await client.api_json("GET", "/user")).get("login")
+    viewer = await client.viewer()
     if owner == viewer:
         repos = await client.paginated(
             "GET", "/user/repos", params={"affiliation": "owner", "per_page": "100"}

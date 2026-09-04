@@ -96,8 +96,9 @@ async def list_repos_for_args(
     skip = as_set(args.skip) or set()
     if extra_skip:
         skip |= extra_skip
+    only = set(args.repos) or None
     return await list_repos(
-        await default_owner(), only=set(args.repos) or None, skip=skip
+        await default_owner(), only=only, skip=skip, require_only_match=bool(only)
     )
 
 
