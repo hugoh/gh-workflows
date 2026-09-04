@@ -2,7 +2,7 @@ from email import message_from_bytes
 from typing import ClassVar
 
 import pytest
-from email_delivery import send_email, send_email_from_env
+from repokit.email import send_email, send_email_from_env
 
 
 class FakeSMTP:

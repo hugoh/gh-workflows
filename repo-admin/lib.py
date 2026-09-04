@@ -1,20 +1,21 @@
 """Shared helpers for repo-admin/*.py scripts. Not meant to be run directly.
 
-GitHub REST transport lives in the `asyncgh` workspace package and the
-fetch-diff-apply kernel in `reconcilekit`; this module re-exports both and
-adds repo-admin's own config-file loading, repo filtering, and sops glue.
+Repo listing/filtering and CLI-entrypoint plumbing live in the `repokit`
+workspace package (published separately since `digest-action` -- a
+standalone GitHub Action repo -- depends on it too); GitHub REST transport
+lives in `asyncgh` and the fetch-diff-apply kernel in `reconcilekit`. This
+module re-exports all three for repo-admin's modules and adds repo-admin's
+own config-file loading, sops glue, and fork/exclude policy -- none of
+which belongs in a package with consumers outside this account.
 """
 
 from __future__ import annotations
 
-import asyncio
 import os
 import subprocess
 import sys
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeVar, cast
+from typing import cast
 
 import yaml
 from reconcilekit.render import console
@@ -45,22 +46,38 @@ from reconcilekit import (
     summary_status,
     unavailable_suffix,
 )
-from reconcilekit import run_parallel as _run_parallel
+from repokit import (
+    DEFAULT_JOBS,
+    DEFAULT_OWNER,
+    Repo,
+    RepoResult,
+    as_set,
+    filter_repos,
+    run_cli,
+    run_parallel,
+)
 
-__all__ = [  # re-exported from asyncgh / reconcilekit for repo-admin's modules
+__all__ = [  # re-exported from asyncgh / reconcilekit / repokit for repo-admin's modules
     "API_BASE",
+    "DEFAULT_JOBS",
+    "DEFAULT_OWNER",
     "GhError",
     "ReconcileError",
+    "Repo",
+    "RepoResult",
     "Status",
     "aclose_client",
     "api_json",
     "api_raw",
+    "as_set",
     "classify_status",
     "console",
     "encrypt_secret_value",
     "error_message",
     "fetch_repos",
+    "filter_repos",
     "graphql",
+    "list_repos",
     "paginated",
     "partition_fields",
     "print_status",
@@ -68,63 +85,21 @@ __all__ = [  # re-exported from asyncgh / reconcilekit for repo-admin's modules
     "public_repos",
     "result_line",
     "run_cli",
+    "run_parallel",
     "run_reconcile",
     "set_repo_secret",
     "summary_status",
     "unavailable_suffix",
+    "unmatched_include_forks",
 ]
 
 LIB_DIR = Path(__file__).resolve().parent
 CONFIG_DIR = LIB_DIR / "config"
-DEFAULT_OWNER = os.environ.get("GH_OWNER", "hugoh")
-DEFAULT_JOBS = int(os.environ.get("GH_JOBS", "6"))
 PAGES_DOMAINS_FILE = CONFIG_DIR / "pages-domains.yaml"
 BRANCH_PROTECTION_EXCLUDE_FILE = CONFIG_DIR / "branch-protection-exclude.txt"
 SECRETS_FILE = CONFIG_DIR / "secrets.yaml"
 SECRETS_ENC_FILE = CONFIG_DIR / "secrets.enc.yaml"
 SOPS_CONFIG_FILE = CONFIG_DIR / ".sops.yaml"
-
-
-_Args = TypeVar("_Args")
-
-
-def run_cli(
-    entrypoint: Callable[[_Args], Awaitable[int]],
-    args: _Args,
-) -> int:
-    """Runs an async CLI entrypoint under asyncio, always closing the shared
-    HTTP client afterwards and turning a GhError into a stderr message plus
-    exit code 1 -- the wrapper every repo-admin/*.py main() shares.
-    """
-
-    async def _run() -> int:
-        try:
-            return await entrypoint(args)
-        finally:
-            await aclose_client()
-
-    try:
-        return asyncio.run(_run())
-    except GhError as exc:
-        print(exc, file=sys.stderr)
-        return 1
-
-
-@dataclass(frozen=True)
-class Repo:
-    name: str
-    default_branch: str
-    is_private: bool
-    is_fork: bool
-    homepage: str = ""
-
-
-@dataclass
-class RepoResult:
-    repo: Repo
-    line: str
-    status: Status = Status.OK
-    tag: str | None = None
 
 
 def default_include_forks() -> set[str]:
@@ -273,40 +248,6 @@ def edit_secrets_file() -> int:
     return result.returncode
 
 
-def filter_repos(
-    repos_json: list[dict],
-    *,
-    only: set[str] | None = None,
-    skip: set[str] | None = None,
-    include_forks: set[str] | None = None,
-) -> list[Repo]:
-    """Keeps every non-archived repo that's either not a fork or is listed in
-    include_forks, then applies only/skip.
-    """
-    include_forks = include_forks or set()
-    repos = []
-    for entry in repos_json:
-        if entry["archived"]:
-            continue
-        name = entry["name"]
-        if entry["fork"] and name not in include_forks:
-            continue
-        if only and name not in only:
-            continue
-        if skip and name in skip:
-            continue
-        repos.append(
-            Repo(
-                name=name,
-                default_branch=entry.get("default_branch") or "",
-                is_private=entry["private"],
-                is_fork=entry["fork"],
-                homepage=entry.get("homepage") or "",
-            )
-        )
-    return repos
-
-
 async def list_repos(
     owner: str = DEFAULT_OWNER,
     *,
@@ -314,6 +255,12 @@ async def list_repos(
     skip: set[str] | None = None,
     include_forks: set[str] | None = None,
 ) -> list[Repo]:
+    """repokit.filter_repos over a fresh fetch, defaulting include_forks to
+    default_include_forks() (config/include-forks.txt, or GH_INCLUDE_FORKS)
+    when the caller doesn't pass one -- repokit itself has no file-backed
+    default, since that's repo-admin-specific policy. Warns (once, using
+    this same fetch) about any include-forks entry matching no repo.
+    """
     if include_forks is None:
         include_forks = default_include_forks()
     # RepoJSON (a TypedDict) isn't assignable to plain dict per ty -- these
@@ -325,21 +272,3 @@ async def list_repos(
             file=sys.stderr,
         )
     return filter_repos(repos_json, only=only, skip=skip, include_forks=include_forks)
-
-
-def as_set(value: str | None) -> set[str] | None:
-    if not value:
-        return None
-    return {v.strip() for v in value.split(",") if v.strip()}
-
-
-async def run_parallel(
-    repos: list[Repo], worker, *, jobs: int = DEFAULT_JOBS, verbose: bool = False
-) -> list[RepoResult]:
-    """reconcilekit.run_parallel with repo-admin's failure exception type bound
-    (so callers keep catching GhError). See reconcilekit.kernel for the
-    concurrency, failure-isolation, and quiet-suppression behaviour.
-    """
-    return await _run_parallel(
-        repos, worker, jobs=jobs, verbose=verbose, error_cls=GhError
-    )

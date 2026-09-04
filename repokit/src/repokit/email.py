@@ -1,9 +1,8 @@
 """Sends a rendered HTML report via an SMTP relay.
 
-Split out of digest.py so fetching/rendering and delivery vary
-independently -- a future consumer (e.g. a GitHub Action) can render the
-same HTML and swap this for a Slack post, a workflow artifact, or nothing
-at all, without digest.py knowing or caring how the report gets delivered.
+Kept separate from repo-fetching concerns so a consumer can swap this for a
+Slack post, a workflow artifact, or nothing at all, without touching how it
+fetches or renders a report.
 """
 
 from __future__ import annotations

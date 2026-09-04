@@ -10,6 +10,7 @@ on: # yamllint disable-line rule:truthy
     paths:
       - asyncgh/**
       - reconcilekit/**
+      - repokit/**
       - .github/workflows/docs.yml
   workflow_dispatch: {}
 
@@ -34,6 +35,10 @@ jobs:
         working-directory: reconcilekit
         run: uv run --with pdoc pdoc reconcilekit --output-directory ../public/reconcilekit
 
+      - name: Build repokit docs
+        working-directory: repokit
+        run: uv run --with pdoc pdoc repokit --output-directory ../public/repokit
+
       - name: Index page
         run: |
           cat > public/index.html <<'EOF'
@@ -43,6 +48,7 @@ jobs:
           <ul>
             <li><a href="asyncgh/">asyncgh</a></li>
             <li><a href="reconcilekit/">reconcilekit</a></li>
+            <li><a href="repokit/">repokit</a></li>
           </ul>
           EOF
 
