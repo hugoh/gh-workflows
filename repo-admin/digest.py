@@ -1,9 +1,10 @@
-"""Builds an HTML digest of activity on hugoh's repos -- still-open PRs
-opened in the last N days, releases published in the last R days, and PRs
-closed in the last M days -- in separate sections, and emails it via an
-smtp2go SMTP relay.
+"""Builds an HTML digest of activity on hugoh's repos -- still-open PRs and
+issues opened in the last N days, releases published in the last R days, and
+PRs and issues closed in the last M days -- in separate sections, and emails
+it via an smtp2go SMTP relay. Renovate's "Dependency Dashboard" issues are
+filtered out as noise.
 
-Usage: digest.py [--open-days 14] [--release-days 7] [--closed-days 7]
+Usage: digest.py [--open-days 365] [--release-days 7] [--closed-days 7]
     [--out FILE] [--no-send]
 
 Reads SMTP settings and the recipient from the environment: SMTP_HOST,
@@ -40,6 +41,8 @@ from rich.progress import Progress, TaskID
 
 _PER_PAGE = "100"
 _FAILING_CONCLUSIONS = {"failure", "timed_out", "cancelled", "action_required"}
+_RENOVATE_LOGINS = {"renovate", "renovate[bot]"}
+_RENOVATE_DASHBOARD_TITLE = "Dependency Dashboard"
 
 
 def _parse_dt(value: str) -> datetime:
@@ -60,6 +63,30 @@ def _normalize_pr(repo_name: str, item: dict) -> dict:
         "created_at": _parse_dt(item["created_at"]),
         "closed_at": _parse_optional_dt(item["closed_at"]),
         "merged": item["merged_at"] is not None,
+        "state": item["state"],
+    }
+
+
+def _is_renovate_dashboard(item: dict) -> bool:
+    """Renovate opens one "Dependency Dashboard" issue per repo and keeps it
+    open indefinitely, editing it in place -- it's not an actionable item,
+    just noise that would otherwise dominate the open-issues section.
+    """
+    return (
+        item["title"] == _RENOVATE_DASHBOARD_TITLE
+        and item["user"]["login"] in _RENOVATE_LOGINS
+    )
+
+
+def _normalize_issue(repo_name: str, item: dict) -> dict:
+    return {
+        "repo": repo_name,
+        "number": item["number"],
+        "title": item["title"],
+        "url": item["html_url"],
+        "author": item["user"]["login"],
+        "created_at": _parse_dt(item["created_at"]),
+        "closed_at": _parse_optional_dt(item["closed_at"]),
         "state": item["state"],
     }
 
@@ -237,6 +264,81 @@ async def fetch_prs(
     return prs
 
 
+async def _fetch_repo_issues(
+    owner: str,
+    name: str,
+    since_updated: datetime,
+    sem: asyncio.Semaphore,
+) -> list[dict]:
+    """Pages a repo's issues newest-updated-first, mirroring _fetch_repo_prs.
+    GitHub's /issues endpoint returns pull requests too (distinguishable by
+    a "pull_request" key) -- those are skipped since fetch_prs already
+    covers them -- as are Renovate's "Dependency Dashboard" issues.
+    """
+    issues = []
+    page = 1
+    while True:
+        async with sem:
+            response = await api_request(
+                "GET",
+                f"/repos/{owner}/{name}/issues",
+                params={
+                    "state": "all",
+                    "sort": "updated",
+                    "direction": "desc",
+                    "per_page": _PER_PAGE,
+                    "page": str(page),
+                },
+            )
+        if not response.is_success:
+            raise GhError(error_message(response), status_code=response.status_code)
+        items = response.json()
+        if not items:
+            break
+
+        page_exhausted = False
+        for item in items:
+            if _parse_dt(item["updated_at"]) < since_updated:
+                page_exhausted = True
+                break
+            if "pull_request" in item:
+                continue
+            if _is_renovate_dashboard(item):
+                continue
+            issues.append(_normalize_issue(name, item))
+
+        if page_exhausted or len(items) < int(_PER_PAGE):
+            break
+        page += 1
+    return issues
+
+
+async def fetch_issues(
+    owner: str,
+    repos: list[Repo],
+    since_updated: datetime,
+    jobs: int = DEFAULT_JOBS,
+    sem: asyncio.Semaphore | None = None,
+) -> list[dict]:
+    """Fetches every repo's issues concurrently, mirroring fetch_prs (minus
+    the CI/mergeable checks, which don't apply to issues).
+    """
+    sem = sem or asyncio.Semaphore(jobs)
+    issues = []
+    with Progress(disable=not sys.stdout.isatty()) as progress:
+        task = progress.add_task("Fetching issues...", total=len(repos))
+
+        async def run_one(repo: Repo) -> list[dict]:
+            result = await _fetch_repo_issues(owner, repo.name, since_updated, sem)
+            progress.advance(task)
+            return result
+
+        results = await asyncio.gather(*(run_one(repo) for repo in repos))
+    for result in results:
+        issues.extend(result)
+    return issues
+
+
 async def _fetch_repo_releases(
     owner: str, name: str, since_published: datetime, sem: asyncio.Semaphore
 ) -> list[dict]:
@@ -320,6 +422,7 @@ def _format_date(dt: datetime) -> str:
 def render_html(
     prs: list[dict],
     releases: list[dict],
+    issues: list[dict],
     since_open: datetime,
     since_closed: datetime,
     since_release: datetime,
@@ -346,10 +449,32 @@ def render_html(
         key=lambda r: r["published_at"],
         reverse=True,
     )
+    open_issues = sorted(
+        (
+            issue
+            for issue in issues
+            if issue["state"] == "open" and issue["created_at"] >= since_open
+        ),
+        key=lambda issue: issue["created_at"],
+        reverse=True,
+    )
+    closed_issues = sorted(
+        (
+            issue
+            for issue in issues
+            if issue["state"] == "closed"
+            and issue["closed_at"] is not None
+            and issue["closed_at"] >= since_closed
+        ),
+        key=lambda issue: issue["closed_at"],
+        reverse=True,
+    )
     return _digest_template.render(
         open_prs=open_prs,
         releases=recent_releases,
         closed_prs=closed_prs,
+        open_issues=open_issues,
+        closed_issues=closed_issues,
         since_open=since_open,
         since_closed=since_closed,
         since_release=since_release,
@@ -396,8 +521,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--open-days",
         type=int,
-        default=14,
-        help="how many days back to look for still-open PRs (default 14)",
+        default=365,
+        help="how many days back to look for still-open PRs and issues (default 365)",
     )
     parser.add_argument(
         "--closed-days",
@@ -427,12 +552,13 @@ async def _main_async(args: argparse.Namespace) -> int:
 
     repos = await list_repos(DEFAULT_OWNER)
     sem = asyncio.Semaphore(DEFAULT_JOBS)
-    prs, releases = await asyncio.gather(
+    prs, releases, issues = await asyncio.gather(
         fetch_prs(DEFAULT_OWNER, repos, since_fetch, sem=sem),
         fetch_releases(DEFAULT_OWNER, repos, since_fetch, sem=sem),
+        fetch_issues(DEFAULT_OWNER, repos, since_fetch, sem=sem),
     )
     rendered = render_html(
-        prs, releases, since_open, since_closed, since_release, until
+        prs, releases, issues, since_open, since_closed, since_release, until
     )
 
     if args.out:
@@ -447,7 +573,7 @@ async def _main_async(args: argparse.Namespace) -> int:
             smtp_password=os.environ["SMTP_PASSWORD"],
             from_addr=os.environ["DIGEST_FROM_EMAIL"],
             to_addr=os.environ["DIGEST_TO_EMAIL"],
-            subject=f"PR digest: {_format_date(until)}",
+            subject=f"GitHub digest: {_format_date(until)}",
         )
     return 0
 
