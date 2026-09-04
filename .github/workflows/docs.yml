@@ -43,13 +43,40 @@ jobs:
         run: |
           cat > public/index.html <<'EOF'
           <!doctype html>
-          <meta charset="utf-8">
-          <title>gh-workflows docs</title>
-          <ul>
-            <li><a href="asyncgh/">asyncgh</a></li>
-            <li><a href="reconcilekit/">reconcilekit</a></li>
-            <li><a href="repokit/">repokit</a></li>
-          </ul>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>gh-workflows docs</title>
+            <style>
+              body {
+                font-family: system-ui, sans-serif;
+                max-width: 40rem;
+                margin: 3rem auto;
+                padding: 0 1rem;
+                color: #1a1a1a;
+              }
+              h1 {
+                font-size: 1.5rem;
+              }
+              ul {
+                padding-left: 1.25rem;
+              }
+              a {
+                color: #0969da;
+              }
+            </style>
+          </head>
+          <body>
+            <h1>gh-workflows docs</h1>
+            <p>API reference for this repo's published Python packages.</p>
+            <ul>
+              <li><a href="asyncgh/">asyncgh</a></li>
+              <li><a href="reconcilekit/">reconcilekit</a></li>
+              <li><a href="repokit/">repokit</a></li>
+            </ul>
+          </body>
+          </html>
           EOF
 
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
