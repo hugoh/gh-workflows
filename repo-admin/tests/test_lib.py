@@ -1,8 +1,10 @@
 import subprocess
 
+import httpx
 import lib
 import pytest
-from lib import GhError, unmatched_include_forks
+import respx
+from lib import API_BASE, GhError, unmatched_include_forks
 
 REPOS_JSON = [
     {
@@ -36,6 +38,35 @@ def test_unmatched_include_forks_empty_when_all_match():
 
 def test_unmatched_include_forks_empty_for_no_include_forks():
     assert unmatched_include_forks(set(), REPOS_JSON) == set()
+
+
+async def test_default_owner_uses_gh_owner_env_without_a_network_call(monkeypatch):
+    monkeypatch.setenv("GH_OWNER", "env-owner")
+    assert await lib.default_owner() == "env-owner"
+
+
+async def test_default_owner_falls_back_to_authenticated_user(
+    monkeypatch, httpx2_mock: respx.Router
+):
+    monkeypatch.delenv("GH_OWNER", raising=False)
+    monkeypatch.setattr("asyncgh.client._auth_token", lambda: "fake-token")
+    httpx2_mock.get(f"{API_BASE}/user").mock(
+        return_value=httpx.Response(200, json={"login": "authenticated-user"})
+    )
+    assert await lib.default_owner() == "authenticated-user"
+
+
+async def test_default_owner_caches_the_resolved_value(
+    monkeypatch, httpx2_mock: respx.Router
+):
+    monkeypatch.delenv("GH_OWNER", raising=False)
+    monkeypatch.setattr("asyncgh.client._auth_token", lambda: "fake-token")
+    route = httpx2_mock.get(f"{API_BASE}/user").mock(
+        return_value=httpx.Response(200, json={"login": "authenticated-user"})
+    )
+    await lib.default_owner()
+    await lib.default_owner()
+    assert route.call_count == 1
 
 
 def test_default_pages_domains_reads_mapping_from_file(tmp_path, monkeypatch):

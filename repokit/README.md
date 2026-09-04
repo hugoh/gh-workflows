@@ -22,12 +22,13 @@ Full API reference, generated from the docstrings:
 
 ```python
 import asyncio
+import os
 
-from repokit import DEFAULT_OWNER, list_repos, run_cli
+from repokit import list_repos, run_cli
 
 
 async def main(args) -> int:
-    repos = await list_repos(DEFAULT_OWNER, only=args.only, skip=args.skip)
+    repos = await list_repos(os.environ["GH_OWNER"], only=args.only, skip=args.skip)
     for repo in repos:
         print(repo.name)
     return 0
