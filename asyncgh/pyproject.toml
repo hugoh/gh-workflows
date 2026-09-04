@@ -1,7 +1,7 @@
 [project]
-name = "reconcilekit"
+name = "asyncgh"
 version = "0.1.0"
-description = "A tiny stateless fetch-diff-apply reconciliation kernel for fleet-wide config tools"
+description = "Minimal async GitHub REST + GraphQL transport: auth, retry, pagination -- no generated models"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -16,27 +16,29 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Topic :: Internet :: WWW/HTTP",
   "Topic :: Software Development :: Libraries :: Python Modules",
   "Typing :: Typed",
 ]
 
-dependencies = ["rich>=13"]
+dependencies = ["httpx2>=2.10", "pynacl>=1.5", "stamina>=25.2"]
 
 [project.urls]
-Homepage = "https://github.com/hugoh/gh-workflows/tree/main/reconcilekit"
+Homepage = "https://github.com/hugoh/gh-workflows/tree/main/asyncgh"
 Issues = "https://github.com/hugoh/gh-workflows/issues"
 Repository = "https://github.com/hugoh/gh-workflows"
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "pytest-httpx2>=0.1", "respx>=0.21"]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/reconcilekit"]
+packages = ["src/asyncgh"]
 
 [tool.pytest.ini_options]
+addopts = ["-p", "pytest_httpx2"]
 testpaths = ["tests"]
 asyncio_mode = "auto"

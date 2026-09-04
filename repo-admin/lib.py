@@ -1,21 +1,38 @@
-"""Shared helpers for repo-admin/*.py scripts. Not meant to be run directly."""
+"""Shared helpers for repo-admin/*.py scripts. Not meant to be run directly.
+
+GitHub REST transport lives in the `asyncgh` workspace package and the
+fetch-diff-apply kernel in `reconcilekit`; this module re-exports both and
+adds repo-admin's own config-file loading, repo filtering, and sops glue.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import os
 import subprocess
 import sys
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TypeVar
 
-import httpx2
 import yaml
-from nacl import encoding, public
 from reconcilekit.render import console
 
+from asyncgh import (
+    API_BASE,
+    GhError,
+    aclose_client,
+    api_json,
+    api_request,
+    encrypt_secret_value,
+    error_message,
+    fetch_repos_json,
+    graphql,
+    paginated,
+    public_repos_json,
+    set_repo_secret,
+)
 from reconcilekit import (
     ReconcileError,
     Status,
@@ -30,22 +47,35 @@ from reconcilekit import (
 )
 from reconcilekit import run_parallel as _run_parallel
 
-__all__ = [  # re-exported from reconcilekit for repo-admin's other modules
+__all__ = [  # re-exported from asyncgh / reconcilekit for repo-admin's modules
+    "API_BASE",
+    "GhError",
+    "ReconcileError",
     "Status",
+    "aclose_client",
+    "api_json",
+    "api_request",
     "classify_status",
     "console",
+    "encrypt_secret_value",
+    "error_message",
+    "fetch_repos_json",
+    "graphql",
+    "paginated",
     "partition_fields",
     "print_status",
     "progress_bar",
+    "public_repos_json",
     "result_line",
+    "run_cli",
     "run_reconcile",
+    "set_repo_secret",
     "summary_status",
     "unavailable_suffix",
 ]
 
 LIB_DIR = Path(__file__).resolve().parent
 CONFIG_DIR = LIB_DIR / "config"
-API_BASE = "https://api.github.com"
 DEFAULT_OWNER = os.environ.get("GH_OWNER", "hugoh")
 DEFAULT_JOBS = int(os.environ.get("GH_JOBS", "6"))
 PAGES_DOMAINS_FILE = CONFIG_DIR / "pages-domains.yaml"
@@ -55,100 +85,29 @@ SECRETS_ENC_FILE = CONFIG_DIR / "secrets.enc.yaml"
 SOPS_CONFIG_FILE = CONFIG_DIR / ".sops.yaml"
 
 
-class GhError(ReconcileError):
-    """A GitHub API call -- or a repo's worker function -- failed unexpectedly.
+_Args = TypeVar("_Args")
 
-    status_code is set for HTTP errors raised by api_json(), so callers can
-    branch on the real status code (e.g. 403 vs 404) instead of
-    string-matching an error message.
+
+def run_cli(
+    entrypoint: Callable[[_Args], Awaitable[int]],
+    args: _Args,
+) -> int:
+    """Runs an async CLI entrypoint under asyncio, always closing the shared
+    HTTP client afterwards and turning a GhError into a stderr message plus
+    exit code 1 -- the wrapper every repo-admin/*.py main() shares.
     """
 
-    def __init__(self, message: str, *, status_code: int | None = None):
-        super().__init__(message)
-        self.status_code = status_code
+    async def _run() -> int:
+        try:
+            return await entrypoint(args)
+        finally:
+            await aclose_client()
 
-
-def _auth_token() -> str:
-    """Reads the token `gh` already has -- keychain storage, SSO, and 2FA are
-    already solved by `gh auth login`, so this reuses that instead of
-    managing a separate credential.
-    """
-    result = subprocess.run(
-        ["gh", "auth", "token"], capture_output=True, text=True, check=False
-    )
-    if result.returncode != 0:
-        raise GhError(f"gh auth token failed: {result.stderr.strip()}")
-    return result.stdout.strip()
-
-
-_client: httpx2.AsyncClient | None = None
-_client_lock = asyncio.Lock()
-
-
-async def _get_client() -> httpx2.AsyncClient:
-    # One shared AsyncClient rather than one per thread: there's no longer a
-    # thread pool, and gh auth token only needs to be paid once per process.
-    global _client
-    if _client is None:
-        async with _client_lock:
-            if _client is None:
-                _client = httpx2.AsyncClient(
-                    headers={
-                        "Authorization": f"Bearer {_auth_token()}",
-                        "Accept": "application/vnd.github+json",
-                        "X-GitHub-Api-Version": "2022-11-28",
-                    },
-                    timeout=30,
-                )
-    return _client
-
-
-async def aclose_client() -> None:
-    global _client
-    if _client is not None:
-        await _client.aclose()
-        _client = None
-
-
-async def api_request(
-    method: str, path: str, *, json: Any = None, params: dict | None = None
-) -> httpx2.Response:
-    """Makes one GitHub REST API call and returns the raw Response --
-    callers decide what a given status means for their endpoint (e.g. a 404
-    means "feature disabled" for vulnerability-alerts but "not found"
-    everywhere else). Raises GhError only for genuine transport failures
-    (DNS, timeout, connection reset); HTTP error statuses are returned, not
-    raised.
-    """
-    url = path if path.startswith("http") else f"{API_BASE}{path}"
-    client = await _get_client()
     try:
-        return await client.request(method, url, json=json, params=params)
-    except httpx2.HTTPError as exc:
-        raise GhError(str(exc)) from exc
-
-
-def error_message(response: httpx2.Response) -> str:
-    """Extracts GitHub's own `message` field from an error response body,
-    falling back to the raw response text if the body isn't JSON.
-    """
-    try:
-        return response.json().get("message", response.text)
-    except ValueError:
-        return response.text
-
-
-async def api_json(
-    method: str, path: str, *, json: Any = None, params: dict | None = None
-) -> dict:
-    """Like api_request, but raises GhError (with status_code and GitHub's
-    own error message) on any non-2xx response, and returns the parsed JSON
-    body -- or {} for a body-less response like 204 No Content -- on success.
-    """
-    response = await api_request(method, path, json=json, params=params)
-    if not response.is_success:
-        raise GhError(error_message(response), status_code=response.status_code)
-    return response.json() if response.content else {}
+        return asyncio.run(_run())
+    except GhError as exc:
+        print(exc, file=sys.stderr)
+        return 1
 
 
 @dataclass(frozen=True)
@@ -166,43 +125,6 @@ class RepoResult:
     line: str
     status: Status = Status.OK
     tag: str | None = None
-
-
-async def _paginated(
-    method: str, path: str, *, params: dict | None = None
-) -> list[dict]:
-    items = []
-    url = path
-    query = params
-    while url:
-        response = await api_request(method, url, params=query)
-        if not response.is_success:
-            raise GhError(error_message(response), status_code=response.status_code)
-        items.extend(response.json())
-        url = response.links.get("next", {}).get("url")
-        query = None  # the "next" link already carries the full query string
-    return items
-
-
-async def fetch_repos_json(owner: str) -> list[dict]:
-    """Lists every repo for `owner`. When `owner` is the authenticated `gh`
-    user, uses /user/repos so private repos are included; otherwise falls
-    back to /users/{owner}/repos, which only ever returns public repos.
-    """
-    viewer = (await api_json("GET", "/user")).get("login")
-    if owner == viewer:
-        return await _paginated(
-            "GET", "/user/repos", params={"affiliation": "owner", "per_page": "100"}
-        )
-    return await _paginated("GET", f"/users/{owner}/repos", params={"per_page": "100"})
-
-
-async def public_repos_json(owner: str) -> list[dict]:
-    """Lists `owner`'s public repos only, via /users/{owner}/repos -- unlike
-    fetch_repos_json, this always excludes private repos even when `owner`
-    is the authenticated user, so no /user call is needed to branch on it.
-    """
-    return await _paginated("GET", f"/users/{owner}/repos", params={"per_page": "100"})
 
 
 def default_include_forks() -> set[str]:
@@ -272,7 +194,7 @@ def default_secrets() -> dict[str, list[str]]:
 def decrypt_secrets() -> dict[str, str]:
     """Decrypts secrets.enc.yaml via `sops -d`, returning secret name ->
     value. Shells out rather than using a sops Python binding -- same
-    external-trusted-CLI style as _auth_token()'s `gh auth token` call.
+    external-trusted-CLI style as asyncgh's `gh auth token` call.
     """
     if not SECRETS_ENC_FILE.exists():
         raise GhError(
@@ -349,36 +271,6 @@ def edit_secrets_file() -> int:
     except FileNotFoundError as exc:
         raise GhError("sops not found on PATH") from exc
     return result.returncode
-
-
-def encrypt_secret_value(public_key_b64: str, value: str) -> str:
-    """Encrypts `value` for GitHub's Actions secrets API using a repo's
-    public key, per GitHub's documented libsodium sealed-box scheme.
-    """
-    public_key = public.PublicKey(
-        public_key_b64.encode("utf-8"), encoding.Base64Encoder
-    )
-    encrypted = public.SealedBox(public_key).encrypt(value.encode("utf-8"))
-    return base64.b64encode(encrypted).decode("utf-8")
-
-
-async def set_repo_secret(
-    owner: str, repo_name: str, secret_name: str, value: str
-) -> None:
-    """Sets one repo's Actions secret via GitHub's REST API: fetches the
-    repo's current public key, encrypts `value` for it, and PUTs the
-    result. The plaintext value never leaves this process -- it's
-    encrypted in memory before the request body is built.
-    """
-    key_data = await api_json(
-        "GET", f"/repos/{owner}/{repo_name}/actions/secrets/public-key"
-    )
-    encrypted_value = encrypt_secret_value(key_data["key"], value)
-    await api_json(
-        "PUT",
-        f"/repos/{owner}/{repo_name}/actions/secrets/{secret_name}",
-        json={"encrypted_value": encrypted_value, "key_id": key_data["key_id"]},
-    )
 
 
 def filter_repos(

@@ -1,2 +1,2 @@
 [tool.uv.workspace]
-members = ["repo-admin", "reconcilekit"]
+members = ["repo-admin", "reconcilekit", "asyncgh"]

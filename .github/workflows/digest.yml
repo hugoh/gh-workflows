@@ -16,15 +16,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
-      - name: Send GitHub digest
-        working-directory: repo-admin
-        env:
-          GH_TOKEN: ${{ secrets.PR_DIGEST_PAT }}
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          DIGEST_FROM_EMAIL: ${{ secrets.DIGEST_FROM_EMAIL }}
-          DIGEST_TO_EMAIL: ${{ secrets.DIGEST_TO_EMAIL }}
-        run: uv run digest.py
+      - uses: ./digest-action
+        with:
+          owner: hugoh
+          github-token: ${{ secrets.PR_DIGEST_PAT }}
+          smtp-host: ${{ secrets.SMTP_HOST }}
+          smtp-port: ${{ secrets.SMTP_PORT }}
+          smtp-username: ${{ secrets.SMTP_USERNAME }}
+          smtp-password: ${{ secrets.SMTP_PASSWORD }}
+          digest-from-email: ${{ secrets.DIGEST_FROM_EMAIL }}
+          digest-to-email: ${{ secrets.DIGEST_TO_EMAIL }}

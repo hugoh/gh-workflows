@@ -1,24 +1,16 @@
 import subprocess
 
-import httpx
 import lib
 import pytest
-import respx
 from lib import (
-    API_BASE,
     GhError,
     Repo,
     RepoResult,
     Status,
-    api_json,
-    api_request,
-    error_message,
-    fetch_repos_json,
     filter_repos,
-    public_repos_json,
+    run_cli,
     unmatched_include_forks,
 )
-from nacl import encoding, public
 
 REPOS_JSON = [
     {
@@ -257,20 +249,6 @@ def test_decrypt_secrets_raises_gh_error_when_file_missing(enc_file, monkeypatch
         lib.decrypt_secrets()
 
 
-def test_encrypt_secret_value_round_trips_through_sealed_box():
-    private_key = public.PrivateKey.generate()
-    public_key_b64 = private_key.public_key.encode(encoding.Base64Encoder).decode(
-        "utf-8"
-    )
-
-    ciphertext_b64 = lib.encrypt_secret_value(public_key_b64, "super-secret-value")
-
-    import base64
-
-    decrypted = public.SealedBox(private_key).decrypt(base64.b64decode(ciphertext_b64))
-    assert decrypted == b"super-secret-value"
-
-
 def test_init_secrets_file_encrypts_template_via_sops_stdin(
     enc_file, tmp_path, monkeypatch
 ):
@@ -347,180 +325,42 @@ def test_edit_secrets_file_raises_gh_error_when_sops_not_on_path(enc_file, monke
         lib.edit_secrets_file()
 
 
-async def test_set_repo_secret_encrypts_and_puts_with_key_id(monkeypatch):
-    private_key = public.PrivateKey.generate()
-    public_key_b64 = private_key.public_key.encode(encoding.Base64Encoder).decode(
-        "utf-8"
-    )
-    calls = []
+def test_run_cli_runs_entrypoint_and_closes_client(monkeypatch):
+    closed = []
+    monkeypatch.setattr(lib, "aclose_client", _record_close(closed))
 
-    async def fake_api_json(method, path, **kwargs):
-        if method == "GET":
-            return {"key": public_key_b64, "key_id": "key-id-123"}
-        calls.append((method, path, kwargs.get("json")))
-        return {}
+    async def entrypoint(args):
+        assert args == "ARGS"
+        return 0
 
-    monkeypatch.setattr(lib, "api_json", fake_api_json)
-    await lib.set_repo_secret("hugoh", "repo", "NAME", "the-value")
-
-    assert len(calls) == 1
-    method, path, body = calls[0]
-    assert method == "PUT"
-    assert path == "/repos/hugoh/repo/actions/secrets/NAME"
-    assert body["key_id"] == "key-id-123"
-
-    import base64
-
-    decrypted = public.SealedBox(private_key).decrypt(
-        base64.b64decode(body["encrypted_value"])
-    )
-    assert decrypted == b"the-value"
+    assert run_cli(entrypoint, "ARGS") == 0
+    assert closed == [True]
 
 
-# ---------------------------------------------------------------------------
-# HTTP layer
-# ---------------------------------------------------------------------------
+def test_run_cli_closes_client_even_when_entrypoint_raises(monkeypatch):
+    closed = []
+    monkeypatch.setattr(lib, "aclose_client", _record_close(closed))
+
+    async def entrypoint(args):
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        run_cli(entrypoint, None)
+    assert closed == [True]
 
 
-@pytest.fixture(autouse=True)
-def fake_auth_token(monkeypatch):
-    # Avoids every test in this module shelling out to the real `gh auth
-    # token` -- client creation is lazy, so this just needs to be in place
-    # before the first api_request/api_json call.
-    monkeypatch.setattr("lib._auth_token", lambda: "fake-token")
+def test_run_cli_converts_gh_error_to_exit_code_1(monkeypatch, capsys):
+    monkeypatch.setattr(lib, "aclose_client", _record_close([]))
+
+    async def entrypoint(args):
+        raise GhError("nope")
+
+    assert run_cli(entrypoint, None) == 1
+    assert "nope" in capsys.readouterr().err
 
 
-async def test_error_message_prefers_json_message_field(httpx2_mock: respx.Router):
-    httpx2_mock.get(f"{API_BASE}/x").mock(
-        return_value=httpx.Response(404, json={"message": "not found"})
-    )
-    response = await api_request("GET", "/x")
-    assert error_message(response) == "not found"
+def _record_close(sink):
+    async def _aclose():
+        sink.append(True)
 
-
-async def test_error_message_falls_back_to_raw_text_for_non_json_body(
-    httpx2_mock: respx.Router,
-):
-    httpx2_mock.get(f"{API_BASE}/x").mock(
-        return_value=httpx.Response(
-            500, text="plain text error", headers={"Content-Type": "text/plain"}
-        )
-    )
-    response = await api_request("GET", "/x")
-    assert error_message(response) == "plain text error"
-
-
-async def test_api_json_returns_parsed_body_on_success(httpx2_mock: respx.Router):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/gh-workflows").mock(
-        return_value=httpx.Response(200, json={"name": "gh-workflows"})
-    )
-    assert await api_json("GET", "/repos/hugoh/gh-workflows") == {
-        "name": "gh-workflows"
-    }
-
-
-async def test_api_json_raises_gh_error_with_status_code_on_failure(
-    httpx2_mock: respx.Router,
-):
-    httpx2_mock.get(f"{API_BASE}/repos/hugoh/nope").mock(
-        return_value=httpx.Response(404, json={"message": "Not Found"})
-    )
-    with pytest.raises(GhError) as exc_info:
-        await api_json("GET", "/repos/hugoh/nope")
-    assert exc_info.value.status_code == 404
-    assert "Not Found" in str(exc_info.value)
-
-
-async def test_api_json_handles_empty_204_response(httpx2_mock: respx.Router):
-    httpx2_mock.put(f"{API_BASE}/repos/hugoh/gh-workflows/vulnerability-alerts").mock(
-        return_value=httpx.Response(204)
-    )
-    assert await api_json("PUT", "/repos/hugoh/gh-workflows/vulnerability-alerts") == {}
-
-
-async def test_api_request_does_not_raise_on_http_error_status(
-    httpx2_mock: respx.Router,
-):
-    httpx2_mock.get(
-        f"{API_BASE}/repos/hugoh/private-repo/private-vulnerability-reporting"
-    ).mock(return_value=httpx.Response(404))
-    response = await api_request(
-        "GET", "/repos/hugoh/private-repo/private-vulnerability-reporting"
-    )
-    assert response.status_code == 404
-
-
-async def test_fetch_repos_json_uses_authenticated_user_repos_when_owner_matches(
-    httpx2_mock: respx.Router,
-):
-    httpx2_mock.get(f"{API_BASE}/user").mock(
-        return_value=httpx.Response(200, json={"login": "hugoh"})
-    )
-    httpx2_mock.get(f"{API_BASE}/user/repos").mock(
-        return_value=httpx.Response(200, json=[{"name": "a"}])
-    )
-    assert await fetch_repos_json("hugoh") == [{"name": "a"}]
-
-
-async def test_fetch_repos_json_falls_back_to_public_repos_for_other_owners(
-    httpx2_mock: respx.Router,
-):
-    httpx2_mock.get(f"{API_BASE}/user").mock(
-        return_value=httpx.Response(200, json={"login": "hugoh"})
-    )
-    httpx2_mock.get(f"{API_BASE}/users/someorg/repos").mock(
-        return_value=httpx.Response(200, json=[{"name": "b"}])
-    )
-    assert await fetch_repos_json("someorg") == [{"name": "b"}]
-
-
-async def test_fetch_repos_json_follows_pagination_link_header(
-    httpx2_mock: respx.Router,
-):
-    httpx2_mock.get(f"{API_BASE}/user").mock(
-        return_value=httpx.Response(200, json={"login": "hugoh"})
-    )
-    # respx routes are tried in registration order and a route with no
-    # `params` constraint matches any query string -- the page=2 route must
-    # be registered first, or the unconstrained page-1 route below would
-    # swallow it too and _paginated would loop on page1 forever.
-    httpx2_mock.get(f"{API_BASE}/user/repos", params={"page": "2"}).mock(
-        return_value=httpx.Response(200, json=[{"name": "page2"}])
-    )
-    httpx2_mock.get(f"{API_BASE}/user/repos").mock(
-        return_value=httpx.Response(
-            200,
-            json=[{"name": "page1"}],
-            headers={"Link": f'<{API_BASE}/user/repos?page=2>; rel="next"'},
-        )
-    )
-    assert await fetch_repos_json("hugoh") == [{"name": "page1"}, {"name": "page2"}]
-
-
-async def test_public_repos_json_uses_public_users_endpoint_even_for_self(
-    httpx2_mock: respx.Router,
-):
-    # /users/{owner}/repos only ever returns public repos, even when owner is
-    # the authenticated user -- unlike fetch_repos_json, no /user call is
-    # needed to check whether owner is the viewer.
-    httpx2_mock.get(f"{API_BASE}/users/hugoh/repos").mock(
-        return_value=httpx.Response(200, json=[{"name": "public-repo"}])
-    )
-    assert await public_repos_json("hugoh") == [{"name": "public-repo"}]
-    assert not any(call.request.url.path == "/user" for call in httpx2_mock.calls)
-
-
-async def test_public_repos_json_follows_pagination_link_header(
-    httpx2_mock: respx.Router,
-):
-    httpx2_mock.get(f"{API_BASE}/users/hugoh/repos", params={"page": "2"}).mock(
-        return_value=httpx.Response(200, json=[{"name": "page2"}])
-    )
-    httpx2_mock.get(f"{API_BASE}/users/hugoh/repos").mock(
-        return_value=httpx.Response(
-            200,
-            json=[{"name": "page1"}],
-            headers={"Link": f'<{API_BASE}/users/hugoh/repos?page=2>; rel="next"'},
-        )
-    )
-    assert await public_repos_json("hugoh") == [{"name": "page1"}, {"name": "page2"}]
+    return _aclose
