@@ -1,0 +1,9 @@
+{
+  "threshold": 0,
+  "reporters": ["ai"],
+  "ignore": [
+    ".github/workflows/release-asyncgh.yml",
+    ".github/workflows/release-repokit.yml",
+    ".github/workflows/release-reconcilekit.yml"
+  ]
+}
