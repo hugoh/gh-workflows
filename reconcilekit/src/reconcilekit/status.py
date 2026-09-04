@@ -19,7 +19,14 @@ class Status(enum.Enum):
     FAILED = "failed"  # worker raised
 
 
+QUIET_STATUSES = (Status.UNCHANGED, Status.LIMITED_UNCHANGED)
+
+
 def classify_status(at_target: bool, changed: bool) -> Status:
+    """The 2x2 -> Status mapping every worker's plan/apply step reduces to:
+    did this run reach the full desired state (`at_target`), and did it
+    change anything to get there (`changed`)?
+    """
     if at_target:
         return Status.OK if changed else Status.UNCHANGED
     return Status.LIMITED if changed else Status.LIMITED_UNCHANGED
@@ -52,4 +59,8 @@ def summary_status(summary: dict[str, list[str]]) -> Status:
 
 
 def unavailable_suffix(unavailable: list[str]) -> str:
+    """Formats a partition_fields() summary's `unavailable` list as a
+    trailing " (unavailable: ...)" note for a result line, or "" when
+    nothing's gated.
+    """
     return f" (unavailable: {', '.join(unavailable)})" if unavailable else ""

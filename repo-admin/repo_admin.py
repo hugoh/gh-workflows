@@ -62,7 +62,7 @@ from lib import (
     RepoResult,
     Status,
     api_json,
-    api_request,
+    api_raw,
     as_set,
     classify_status,
     default_branch_protection_exclude,
@@ -304,9 +304,7 @@ async def _fetch_security_state(
 
     # 204 = enabled, 404 = disabled -- GitHub's documented shape for this
     # endpoint, not an error either way.
-    vuln_response = await api_request(
-        "GET", f"/repos/{owner}/{name}/vulnerability-alerts"
-    )
+    vuln_response = await api_raw("GET", f"/repos/{owner}/{name}/vulnerability-alerts")
     if vuln_response.status_code not in (204, 404):
         raise GhError(
             error_message(vuln_response), status_code=vuln_response.status_code
@@ -314,7 +312,7 @@ async def _fetch_security_state(
     vuln_alerts_enabled = vuln_response.status_code == 204
 
     # 200 = available (body has "enabled"), 404 = not available on this plan.
-    pvr_response = await api_request(
+    pvr_response = await api_raw(
         "GET", f"/repos/{owner}/{name}/private-vulnerability-reporting"
     )
     if pvr_response.status_code not in (200, 404):
@@ -323,7 +321,7 @@ async def _fetch_security_state(
 
     # 200 = available (body has "state"), 404/403 = not available on this
     # plan or repo (no Advanced Security, GHES, or no supported language).
-    codeql_response = await api_request(
+    codeql_response = await api_raw(
         "GET", f"/repos/{owner}/{name}/code-scanning/default-setup"
     )
     if codeql_response.status_code not in (200, 403, 404):
@@ -364,7 +362,7 @@ def make_security_features_worker(owner: str, dry_run: bool):
 
             # 422 = one or more of these fields isn't available on this plan
             # (GitHub Advanced Security is required for private repos).
-            security_response = await api_request(
+            security_response = await api_raw(
                 "PATCH",
                 f"/repos/{owner}/{repo.name}",
                 json={
@@ -384,7 +382,7 @@ def make_security_features_worker(owner: str, dry_run: bool):
                 )
 
             # 404 = not available on this plan.
-            pvr_response = await api_request(
+            pvr_response = await api_raw(
                 "PUT", f"/repos/{owner}/{repo.name}/private-vulnerability-reporting"
             )
             if pvr_response.status_code == 404:
@@ -396,7 +394,7 @@ def make_security_features_worker(owner: str, dry_run: bool):
 
             # 403/404 = not available on this plan or repo; 422 = no
             # CodeQL-supported language detected in the repo.
-            codeql_response = await api_request(
+            codeql_response = await api_raw(
                 "PATCH",
                 f"/repos/{owner}/{repo.name}/code-scanning/default-setup",
                 json={"state": "configured"},
@@ -676,7 +674,7 @@ def make_branch_protection_worker(
         if pr_head_shas:
             contexts = await _check_run_contexts(owner, repo.name, pr_head_shas)
 
-        protection_response = await api_request(
+        protection_response = await api_raw(
             "GET",
             f"/repos/{owner}/{repo.name}/branches/{repo.default_branch}/protection",
         )
@@ -748,7 +746,7 @@ def make_branch_protection_worker(
             )
 
         payload = branch_protection_payload(contexts)
-        put_response = await api_request(
+        put_response = await api_raw(
             "PUT",
             f"/repos/{owner}/{repo.name}/branches/{repo.default_branch}/protection",
             json=payload,
@@ -999,7 +997,7 @@ async def cmd_pages_sync(args: argparse.Namespace) -> int:
 
 
 async def _fetch_pages_config(owner: str, name: str) -> dict | None:
-    response = await api_request("GET", f"/repos/{owner}/{name}/pages")
+    response = await api_raw("GET", f"/repos/{owner}/{name}/pages")
     if response.status_code == 404:
         return None
     if not response.is_success:

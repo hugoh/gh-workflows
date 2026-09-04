@@ -1,27 +1,33 @@
 # asyncgh
 
 A minimal async GitHub API transport — the plumbing an account-wide config
-tool needs before any of its domain logic: authentication, a shared
-connection, retrying error handling, REST pagination, and GraphQL.
+tool needs before any of its domain logic: authentication, a connection,
+retrying error handling, REST pagination, and GraphQL.
 
-There is no client object to construct and no config. It reads the token
-`gh auth login` already stored, keeps one process-wide `httpx2.AsyncClient`,
-and exposes plain functions.
+`GitHubClient` is the actual client. For a script that only ever talks to
+one account, module-level functions (`api_json`, `graphql`, `fetch_repos`,
+...) wrap one shared default instance, so there's nothing to construct --
+they read the token `gh auth login` already stored and go. Construct a
+`GitHubClient` directly to talk to a second account in the same process, use
+your own retry budget, or as an async context manager.
 
-## Why not PyGithub / githubkit / gidgethub / fast.ai's `ghapi`?
+## How this compares
 
-| Library | Async | Shape | Trade-off vs `asyncgh` |
-|---|---|---|---|
-| [PyGithub](https://github.com/PyGithub/PyGithub) | no | typed objects | sync-only — a poor fit for anything doing concurrent, fan-out API calls |
-| [githubkit](https://github.com/yanyongyu/githubkit) | yes | Pydantic models, generated from GitHub's OpenAPI spec | full, typed surface, but pulls in codegen'd models and `pydantic`; heavier than most scripts need |
-| [gidgethub](https://github.com/gidgethub/gidgethub) | yes | sans-I/O, bring-your-own HTTP client | closest in spirit, but leaves auth, retry, and the client itself to the caller |
-| [ghapi](https://ghapi.fast.ai) (fast.ai) | no | OpenAPI-generated, dynamic attribute access | lightweight like this package, but sync-only |
-| **asyncgh** | yes | plain `dict`s, ~200 lines | no generated models, no schema — you read GitHub's own docs and index the JSON; retry and GraphQL are built in, not bolted on |
+| Library | Async | Shape |
+|---|---|---|
+| [PyGithub](https://github.com/PyGithub/PyGithub) | no | typed objects |
+| [githubkit](https://github.com/yanyongyu/githubkit) | yes | Pydantic models, generated from GitHub's OpenAPI spec |
+| [gidgethub](https://github.com/gidgethub/gidgethub) | yes | sans-I/O, bring-your-own HTTP client |
+| [ghapi](https://ghapi.fast.ai) (fast.ai) | no | OpenAPI-generated, dynamic attribute access |
+| **asyncgh** | yes | plain `dict`s, ~550 lines |
 
-If you want typed responses and full API coverage, use `githubkit`. If you
-want an async client with almost no code between you and the wire — a script
-firing dozens of concurrent calls that reads a handful of fields per
-response — that's what this is for.
+`githubkit` gives you typed responses and full API coverage, at the cost of
+codegen'd models and a `pydantic` dependency. `gidgethub` is closest in
+spirit -- sans-I/O, no models -- but leaves auth, retry, and the client
+itself to the caller. `asyncgh` picks a specific point in that space: an
+async client with almost no code between you and the wire, no generated
+models or schema (you read GitHub's own docs and index the JSON), retry and
+GraphQL built in rather than bolted on.
 
 ## API
 
@@ -33,27 +39,30 @@ Full API reference, generated from the docstrings:
 ## Auth
 
 `Authorization: Bearer $(gh auth token)`, resolved lazily on the first
-request and cached for the process. `gh` must be installed and logged in.
+request and cached for the client's lifetime. `gh` must be installed and
+logged in -- or pass `GitHubClient(token=...)` to skip the `gh` dependency
+entirely and use your own.
 
 ## Retries
 
-`api_request` retries transport errors (DNS, timeout, reset) and transient
+`api_raw` retries transport errors (DNS, timeout, reset) and transient
 statuses — 429, 500, 502, 503, 504 — via [`stamina`](https://stamina.hynek.me).
 A `Retry-After` header sets the exact wait; otherwise exponential backoff with
-jitter. `GH_MAX_RETRIES` (default 3) caps the retries; there is no wall-clock
-timeout, so a minute-long `Retry-After` is honoured in full. When the retries
-are spent the last response is returned unchanged for the caller to judge.
+jitter. `max_retries` (default from `GH_MAX_RETRIES`, else 3) caps the
+retries per `GitHubClient` instance; there is no wall-clock timeout, so a
+minute-long `Retry-After` is honoured in full. When the retries are spent the
+last response is returned unchanged for the caller to judge.
 
-`graphql()` reuses that same retry for transport errors and 429/5xx, plus one
-addition: GitHub answers GraphQL rate limiting with HTTP 200 and an
-`errors[].type == "RATE_LIMITED"` body, which `api_request`'s status-based
-retry never sees -- `graphql()` retries that case itself, on the same
-backoff. Any other GraphQL error (bad query, not found) is not transient and
-raises immediately.
+`graphql()` retries the same cases (transport errors, 429/5xx) plus one more,
+in the same single retry loop: GitHub answers GraphQL rate limiting with HTTP
+200 and an `errors[].type == "RATE_LIMITED"` body, invisible to a
+status-based retry. Any other GraphQL error (bad query, not found) is not
+transient and raises immediately, with the failing error's `type` on
+`GhError.error_type`.
 
 ## Consumers
 
 `repo-admin/` (in this repo) uses it for every account-wide GitHub command --
-`repo_admin.py`'s `sync` subcommands and `activity.py` via `api_request`/
+`repo_admin.py`'s `sync` subcommands and `activity.py` via `api_raw`/
 `api_json`/pagination; `digest.py` (wrapped by `../digest-action/`) is the
 one driving `graphql()`.

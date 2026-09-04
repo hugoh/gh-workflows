@@ -421,12 +421,12 @@ def _security_worker(
     async def fake_api_json(*a, **k):
         return {}
 
-    async def fake_api_request(*a, **k):
+    async def fake_api_raw(*a, **k):
         return next(responses_iter)
 
     monkeypatch.setattr(repo_admin, "_fetch_security_state", fake_fetch_security_state)
     monkeypatch.setattr(repo_admin, "api_json", fake_api_json)
-    monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
+    monkeypatch.setattr(repo_admin, "api_raw", fake_api_raw)
     return repo_admin.make_security_features_worker(owner="hugoh", dry_run=dry_run)
 
 
@@ -843,14 +843,14 @@ def _branch_protection_worker(
 
     calls = [] if track_calls else None
 
-    async def fake_api_request(method, *a, **k):
+    async def fake_api_raw(method, *a, **k):
         if calls is not None:
             calls.append(method)
         return response
 
     monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", fake_shas)
     monkeypatch.setattr(repo_admin, "_check_run_contexts", fake_contexts)
-    monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
+    monkeypatch.setattr(repo_admin, "api_raw", fake_api_raw)
     worker = repo_admin.make_branch_protection_worker(
         owner="hugoh", dry_run=dry_run, clear_stale_checks=clear_stale_checks
     )
@@ -881,12 +881,12 @@ async def test_branch_protection_worker_apply_ok_when_no_prs_yet(monkeypatch):
 
     calls = []
 
-    async def fake_api_request(method, *a, **k):
+    async def fake_api_raw(method, *a, **k):
         calls.append(method)
         return _FakeResponse(404) if method == "GET" else _FakeResponse(200)
 
     monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", fake_shas)
-    monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
+    monkeypatch.setattr(repo_admin, "api_raw", fake_api_raw)
     worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=False)
     result = await worker(REPO)
     assert result.status == Status.OK
@@ -1468,13 +1468,13 @@ async def test_cmd_pages_status_lists_enabled_repos_and_flags_unmapped(
         "no-pages": _FakeResponseWithJson(404, {}),
     }
 
-    async def fake_api_request(method, path, **kwargs):
+    async def fake_api_raw(method, path, **kwargs):
         name = path.split("/")[3]
         return pages_configs[name]
 
     monkeypatch.setenv("COLUMNS", "200")
     monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
-    monkeypatch.setattr(repo_admin, "api_request", fake_api_request)
+    monkeypatch.setattr(repo_admin, "api_raw", fake_api_raw)
     monkeypatch.setattr(
         repo_admin.lib, "default_pages_domains", lambda: {"awesome-jj": DOMAIN}
     )

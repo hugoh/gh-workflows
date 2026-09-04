@@ -20,10 +20,10 @@ from lib import (
     GhError,
     Repo,
     api_json,
-    api_request,
+    api_raw,
     error_message,
     list_repos,
-    public_repos_json,
+    public_repos,
 )
 from rich.table import Table
 
@@ -46,7 +46,7 @@ async def _fetch_repo_commit_dates(
     page = 1
     while True:
         async with sem:
-            response = await api_request(
+            response = await api_raw(
                 "GET",
                 f"/repos/{owner}/{name}/commits",
                 params={
@@ -196,11 +196,11 @@ async def run(args: argparse.Namespace) -> int:
     since = now - timedelta(days=args.window_months * _MONTH_DAYS)
 
     author = (await api_json("GET", "/user"))["login"]
-    all_repos, public_repos = await asyncio.gather(
+    all_repos, public_repos_json = await asyncio.gather(
         list_repos(DEFAULT_OWNER),
-        public_repos_json(DEFAULT_OWNER),
+        public_repos(DEFAULT_OWNER),
     )
-    public_names = {entry["name"] for entry in public_repos}
+    public_names = {entry["name"] for entry in public_repos_json}
     public_repo_objs = [r for r in all_repos if r.name in public_names]
 
     sem = asyncio.Semaphore(DEFAULT_JOBS)
