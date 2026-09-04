@@ -11,6 +11,7 @@ which belongs in a package with consumers outside this account.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -57,18 +58,24 @@ from repokit import (
 )
 
 _default_owner: str | None = None
+_default_owner_lock = asyncio.Lock()
 
 
 async def default_owner() -> str:
     """The account to operate on: GH_OWNER if set, otherwise whoever the
     current token authenticates as (`GET /user`) -- cached since it's the
-    same account for the life of one invocation.
+    same account for the life of one invocation. Double-checked under a
+    lock so concurrent callers racing the first resolution share one
+    `GET /user` call instead of each firing their own.
     """
     global _default_owner
     if _default_owner is None:
-        _default_owner = (
-            os.environ.get("GH_OWNER") or (await api_json("GET", "/user"))["login"]
-        )
+        async with _default_owner_lock:
+            if _default_owner is None:
+                _default_owner = (
+                    os.environ.get("GH_OWNER")
+                    or (await api_json("GET", "/user"))["login"]
+                )
     return _default_owner
 
 
