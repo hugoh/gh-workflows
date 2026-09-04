@@ -1,5 +1,7 @@
 # repokit
 
+[![PyPI](https://img.shields.io/pypi/v/hugoh-repokit)](https://pypi.org/project/hugoh-repokit/)
+
 Repo listing/filtering and CLI-entrypoint plumbing shared by repo-admin-style
 scripts: fetch an account's repos via [`asyncgh`](../asyncgh/README.md), keep
 the non-archived/non-fork (by default) ones matching an `only`/`skip` filter,

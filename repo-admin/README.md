@@ -127,8 +127,9 @@ The account-activity digest (still-open/closed PRs and issues, releases)
 used to live here as `digest.py`, wrapped by a local `digest-action/`
 composite Action. It's now [`hugoh/digest-action`](https://github.com/hugoh/digest-action),
 a standalone repo — GitHub Marketplace only publishes an Action from a
-repository root, so it moved out, taking `repokit` (published to PyPI) as
-its dependency instead of reaching back into this repo.
+repository root, so it moved out, taking `repokit` ([published to
+PyPI](https://pypi.org/project/hugoh-repokit/)) as its dependency instead of
+reaching back into this repo.
 
 ## Tests
 
