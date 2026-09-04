@@ -1260,25 +1260,27 @@ def test_pages_domain_apply_line_https_enabled():
     assert line == f"{'repo':<30} https_enforced -> true"
 
 
-async def test_pages_domain_worker_dry_run_unchanged(monkeypatch):
+def _pages_domain_dry_run_worker(monkeypatch, pages_config):
     async def fake_pages_config(owner, name):
-        return {"cname": DOMAIN, "https_enforced": True}
+        return pages_config
 
     monkeypatch.setattr(repo_admin, "_pages_config", fake_pages_config)
-    worker = repo_admin.make_pages_domain_worker(
+    return repo_admin.make_pages_domain_worker(
         owner="hugoh", dry_run=True, domains={"repo": DOMAIN}
+    )
+
+
+async def test_pages_domain_worker_dry_run_unchanged(monkeypatch):
+    worker = _pages_domain_dry_run_worker(
+        monkeypatch, {"cname": DOMAIN, "https_enforced": True}
     )
     result = await worker(PAGES_REPO)
     assert result.status == Status.UNCHANGED
 
 
 async def test_pages_domain_worker_dry_run_would_set_cname(monkeypatch):
-    async def fake_pages_config(owner, name):
-        return {"cname": None, "https_enforced": False}
-
-    monkeypatch.setattr(repo_admin, "_pages_config", fake_pages_config)
-    worker = repo_admin.make_pages_domain_worker(
-        owner="hugoh", dry_run=True, domains={"repo": DOMAIN}
+    worker = _pages_domain_dry_run_worker(
+        monkeypatch, {"cname": None, "https_enforced": False}
     )
     result = await worker(REPO)
     assert result.status == Status.LIMITED
@@ -1288,28 +1290,21 @@ async def test_pages_domain_worker_dry_run_would_set_cname(monkeypatch):
 async def test_pages_domain_worker_dry_run_limited_unchanged_when_cert_pending(
     monkeypatch,
 ):
-    async def fake_pages_config(owner, name):
-        return {
+    worker = _pages_domain_dry_run_worker(
+        monkeypatch,
+        {
             "cname": DOMAIN,
             "https_enforced": False,
             "https_certificate": {"state": "pending"},
-        }
-
-    monkeypatch.setattr(repo_admin, "_pages_config", fake_pages_config)
-    worker = repo_admin.make_pages_domain_worker(
-        owner="hugoh", dry_run=True, domains={"repo": DOMAIN}
+        },
     )
     result = await worker(PAGES_REPO)
     assert result.status == Status.LIMITED_UNCHANGED
 
 
 async def test_pages_domain_worker_dry_run_flags_homepage_mismatch(monkeypatch):
-    async def fake_pages_config(owner, name):
-        return {"cname": DOMAIN, "https_enforced": True}
-
-    monkeypatch.setattr(repo_admin, "_pages_config", fake_pages_config)
-    worker = repo_admin.make_pages_domain_worker(
-        owner="hugoh", dry_run=True, domains={"repo": DOMAIN}
+    worker = _pages_domain_dry_run_worker(
+        monkeypatch, {"cname": DOMAIN, "https_enforced": True}
     )
     result = await worker(REPO)
     assert result.status == Status.LIMITED
