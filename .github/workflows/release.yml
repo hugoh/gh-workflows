@@ -7,25 +7,29 @@ on: # yamllint disable-line rule:truthy
   workflow_call:
     inputs:
       tag:
-        description: Existing tag to create a GitHub Release for (skips the bump; requires notes)
+        description: Existing tag to create a GitHub Release for; skips the bump
         type: string
         required: false
       notes:
-        description: Release notes body (required when tag is set)
+        description: "Release notes body (default: GitHub auto-generated notes)"
         type: string
         required: false
       major-tag:
         description: Also force-move the vN major tag to the new release (for Marketplace actions)
         type: boolean
         default: false
+    outputs:
+      tag:
+        description: The tag that was released, or empty when there was nothing to release
+        value: ${{ jobs.release.outputs.tag }}
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing tag to create a GitHub Release for (skips the bump; requires notes)
+        description: Existing tag to create a GitHub Release for; skips the bump
         required: false
         type: string
       notes:
-        description: Release notes body (required when tag is set)
+        description: "Release notes body (default: GitHub auto-generated notes)"
         required: false
         type: string
 
@@ -38,47 +42,83 @@ concurrency:
 
 jobs:
   release:
-    timeout-minutes: 5
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Bump version and push tag
-        id: tag_version
-        if: inputs.tag == ''
-        uses: mathieudutour/github-tag-action@a22cf08638b34d5badda920f9daf6e72c477b07b # v6.2
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          default_bump: false
+      - name: Install cocogitto
+        env:
+          # renovate: datasource=github-releases depName=cocogitto/cocogitto
+          COG_VERSION: 7.0.0
+        run: |
+          set -euo pipefail
+          ver="$COG_VERSION"
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSfL --retry 3 --retry-all-errors --retry-delay 5 \
+            "https://github.com/cocogitto/cocogitto/releases/download/${ver}/cocogitto-${ver}-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP/bin" cog
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-      - name: Create a GitHub release
-        if: inputs.tag != '' || steps.tag_version.outputs.new_tag != ''
+      - name: Release
+        id: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NEW_TAG: ${{ inputs.tag != '' && inputs.tag || steps.tag_version.outputs.new_tag }}
-          CHANGELOG: ${{ inputs.notes != '' && inputs.notes || steps.tag_version.outputs.changelog }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_NOTES: ${{ inputs.notes }}
+          MAJOR_TAG: ${{ inputs.major-tag }}
         run: |
-          gh release create "$NEW_TAG" \
-            --verify-tag \
-            --title "Release $NEW_TAG" \
-            --notes "$CHANGELOG"
+          set -euo pipefail
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
 
-      - name: Move the major-version tag
-        if: >-
-          inputs.major-tag &&
-          (inputs.tag != '' || steps.tag_version.outputs.new_tag != '')
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NEW_TAG: ${{ inputs.tag != '' && inputs.tag || steps.tag_version.outputs.new_tag }}
-        run: |
-          major="${NEW_TAG%%.*}"
-          sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${NEW_TAG}" --jq '.object.sha')
-          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/${major}" \
-            -f "sha=${sha}" -F force=true \
-          || gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
-            -f "ref=refs/tags/${major}" -f "sha=${sha}"
+          # Canonical fleet cog config — release-time only, carried here so no
+          # consumer repo needs its own cog.toml. `disable_bump_commit` means
+          # `cog bump` only creates the tag: no commit, no CHANGELOG.md file.
+          cat > "$RUNNER_TEMP/cog.toml" <<'EOF'
+          tag_prefix = "v"
+          disable_changelog = true
+          disable_bump_commit = true
+          ignore_merge_commits = true
+
+          [commit_types.perf]
+          bump_patch = true
+          EOF
+
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          else
+            cog --config "$RUNNER_TEMP/cog.toml" bump --auto || true
+            TAG="$(git tag --points-at HEAD | grep -E '^v[0-9]' | head -1 || true)"
+            if [ -z "$TAG" ]; then
+              echo "no releasable commits — nothing to do"
+              exit 0
+            fi
+            git remote set-url origin \
+              "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}"
+            git push origin "refs/tags/${TAG}"
+          fi
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$INPUT_NOTES" ]; then
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes "$INPUT_NOTES"
+          else
+            gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
+          fi
+
+          if [ "$MAJOR_TAG" = "true" ]; then
+            major="${TAG%%.*}"
+            sha="$(git rev-list -n1 "$TAG")"
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/${major}" \
+              -f "sha=${sha}" -F force=true \
+            || gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f "ref=refs/tags/${major}" -f "sha=${sha}"
+          fi
