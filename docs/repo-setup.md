@@ -25,18 +25,39 @@ Run from `gh-workflows/`:
 
 | File | Purpose | Notes |
 |---|---|---|
-| `.github/workflows/hk.yml` | lint / conventional-commit check | thin caller of `hugoh/gh-workflows/.github/workflows/hk.yml` |
-| `.github/workflows/release.yml` | tag + GitHub release | thin caller of `hugoh/gh-workflows/.github/workflows/release.yml`; **omit** if the repo isn't released |
+| `.github/workflows/hk.yml` | lint / conventional-commit check | `setup` + `hk-check` composite actions (becomes a thin `workflow_call` caller once that reusable lands) |
+| `.github/workflows/release.yml` | tag + GitHub release | `mathieudutour/github-tag-action` + `gh release create`; **omit** if the repo isn't released |
 | `.github/workflows/rerun-transient-failures.yml` | retry transient CI failures | optional; `workflow_run` trigger → [`hugoh/rerun-transient-failures`](https://github.com/hugoh/rerun-transient-failures) |
 | `.renovaterc.json` | dependency updates | `{"extends": ["github>hugoh/renovate-config"]}` — nothing else unless the repo needs an override |
 | `hk.pkl` | lint ruleset | `amends "package://github.com/hugoh/hk-config/..."` |
 | `mise.toml` | toolchain | repo-specific tools; `hk` line is Renovate-managed via hk-config's preset |
 | `cog.toml` | release config | **only if overriding** — monorepo `[packages]`, a custom changelog template, or `pre_bump_hooks`. The reusable `release.yml` supplies the canonical config otherwise. |
 
-Once these exist, Renovate keeps every version line current — the reusable
-workflow `@<sha>` pins, action pins, tool pins. Structural changes to the
-templates ship inside the reusable workflows and arrive via the `@<sha>` bump;
-they don't need a re-scaffold.
+### How Renovate keeps a scaffolded repo current
+
+Once the repo exists with `.renovaterc.json` → `github>hugoh/renovate-config`:
+
+| What | Manager | Cadence |
+|---|---|---|
+| `mise.toml` tool versions | Renovate `mise` manager (built-in) | monthly, grouped |
+| `jdx/hk` + `hugoh/hk-config` in `hk.pkl`, `hk` line in `mise.toml` | `hk-config`'s regex managers (inherited via the preset) | debounced chain |
+| `uses:` pins in the workflow files | Renovate `github-actions` manager | monthly |
+| `hugoh/gh-workflows` (and `go-tools` / `spoon-tools`) pins | same, but a dedicated `renovate-config` rule | within a day, automerged |
+
+So a scaffolded repo is self-maintaining from day one. Structural changes to
+the templates don't propagate — a re-scaffold (`--force` on the affected
+files) or a hand-patch handles those; they're rare by design.
+
+### How the templates themselves stay current
+
+`templates/` carries **no version numbers**. `repo scaffold` reads the tool
+versions out of `gh-workflows`'s own `mise.toml` and `hk.pkl` at render time —
+those are this repo's canonical toolchain, which Renovate already keeps
+current here. One source of truth, no template drift, no custom managers.
+The workflow templates reference `hugoh/gh-workflows` at a ref `repo scaffold`
+resolves to the latest release; third-party actions in them (`actions/checkout`
+etc.) are floating-major seeds that the scaffold's `pinact run` step pins in
+the new repo before first commit.
 
 ### Standard caller shapes
 
@@ -76,14 +97,26 @@ jobs:
 - Add `renovate/**` to any `push:` trigger. Renovate opens PRs and merges them
   itself (`renovate-config` sets `platformAutomerge: false`); a `renovate/**`
   push trigger just double-builds.
-- Hand-copy the reusable workflow bodies. If a repo genuinely can't use the
-  thin caller (bespoke interleaved steps), use the `setup` + `hk-check`
-  composite actions directly and keep the standardized `on:` / `concurrency:`
-  / `permissions:` header.
+- Hand-write a workflow from scratch. Run `repo scaffold` (below), or for a
+  bespoke case use the `setup` + `hk-check` composite actions and keep the
+  standardized `on:` / `concurrency:` / `permissions:` header.
 
-## Automating the scaffold
+## Scaffolding a new repo
 
-`repo-admin` covers settings; the per-repo files are a planned
-`repo-admin files sync` command (fetch-diff-apply via `reconcilekit`, like
-`pages sync`) that renders the canonical caller set from this repo's templates
-into a target repo and opens a PR. Until then, copy the shapes above.
+```text
+cd gh-workflows
+./repo-admin.sh repo scaffold ../my-new-repo --release --tests python
+/project-setup                       # from the new repo: jj policy + CLAUDE.md
+# review, jj commit
+gh repo create hugoh/my-new-repo --private --source ../my-new-repo --push
+./repo-admin.sh sync my-new-repo     # merge / protection / security
+```
+
+Flags: `--release`, `--pages`, `--action` (Marketplace/action repo — adds
+`action.yml` + major-tag move), `--rerun-transient`, `--tests {none,python}`,
+`--shell`, `--apt-packages`, `--pre-hk`, `--default-branch`. `--dry-run` to
+preview. Templates live in [`../templates/`](../templates/).
+
+An ongoing `repo-admin files sync` (reconcile existing repos against the
+templates, like `pages sync`) is still planned; for now a re-scaffold with
+`--force` on the drifted files does the job.

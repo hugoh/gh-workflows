@@ -5,6 +5,9 @@ Usage: repo_admin.py <resource> <verb> [repo ...] [--dry-run] [--verbose] [--ski
 
   repos    list                 list repos as a table: name, default branch,
                                  private, fork
+  repo     scaffold PATH        render a new repo's baseline files (hk.pkl,
+                                 mise.toml, .renovaterc.json, workflow callers)
+                                 from templates/ — see `repo scaffold --help`
   merge    sync                 enable auto-merge, delete-branch-on-merge,
                                  and PR-branch auto-update
   protection sync               apply a baseline branch-protection policy to
@@ -54,6 +57,7 @@ import sys
 
 import activity
 import lib
+import scaffold
 import yaml
 from lib import (
     DEFAULT_JOBS,
@@ -1294,6 +1298,10 @@ async def cmd_activity(args: argparse.Namespace) -> int:
     return await activity.run(args)
 
 
+async def cmd_repo_scaffold(args: argparse.Namespace) -> int:
+    return await scaffold.run(args)
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -1329,6 +1337,12 @@ def build_parser() -> argparse.ArgumentParser:
     resource_verbs("repos").add_parser("list", parents=[repo_scope]).set_defaults(
         func=cmd_repos_list
     )
+
+    repo_scaffold = resource_verbs("repo").add_parser(
+        "scaffold", help="render a new repo's baseline files from templates/"
+    )
+    scaffold.add_arguments(repo_scaffold)
+    repo_scaffold.set_defaults(func=cmd_repo_scaffold)
     resource_verbs("merge").add_parser("sync", parents=[mutating]).set_defaults(
         func=cmd_merge_sync
     )

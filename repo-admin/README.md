@@ -30,6 +30,19 @@ uv run repo_admin.py <resource> <verb> [repo ...] \
 
 - **`repos list`** — lists repos as a table: name, default branch, private,
   fork
+- **`repo scaffold PATH [flags]`** — renders a new fleet repo's baseline
+  files from [`../templates/`](../templates/): the shared dev-tooling
+  (`hk.pkl`, `mise.toml`, `.renovaterc.json`, editor/lint config, `LICENSE`)
+  plus the workflow callers the feature flags ask for (`--release`,
+  `--pages`, `--action`, `--rerun-transient`), then `jj git init`. One-shot,
+  not `copier update`: after this Renovate keeps every version line current
+  (the repo inherits `github>hugoh/renovate-config`). Tool versions in the
+  rendered `mise.toml`/`hk.pkl` are read from **this repo's own**
+  `mise.toml`/`hk.pkl` at render time — the one place Renovate already keeps
+  the canonical toolchain — so a scaffold is never stale and the templates
+  carry no version numbers. Idempotent: existing files are kept (`--force`
+  to overwrite), an existing git/jj repo is left as-is. `--dry-run` to
+  preview. See `repo scaffold --help` for the full flag list.
 - **`merge sync [--dry-run]`** — enables auto-merge,
   delete-branch-on-merge, and PR-branch auto-update (the last one matters
   because branch protection requires PR branches to be up to date before
