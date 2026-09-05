@@ -43,6 +43,11 @@ Packages ([details](#packages)):
   e.g. `level: minor` → `["0.42","0.43","0.44"]`, `level: major, count: 2` →
   `["1","2"]`. Needs `mise` on `PATH` (run `setup` first). `go-tools`'
   `go-tool-compat.yml` reusable workflow wraps this.
+- **`cog-bump`** — `cog bump` with the canonical fleet `cog.toml`
+  (`tag_prefix = "v"`, `disable_changelog`, `disable_bump_commit` → tag-only,
+  no commit). Pushes the tag by default; `tag` output is empty when nothing
+  is releasable. Needs the repo checked out with `fetch-depth: 0`. Used by
+  the reusable `release.yml` and `spoon-tools`' `spoon-tag.yml`.
 - **[`hugoh/digest-action`](https://github.com/hugoh/digest-action)** —
   builds (and optionally emails) an HTML digest of a GitHub account's repo
   activity. A separate repo (not part of this one) since GitHub Marketplace
