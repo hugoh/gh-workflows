@@ -11,6 +11,10 @@ on: # yamllint disable-line rule:truthy
       - asyncgh/**
       - .github/workflows/release-asyncgh.yml
 
+concurrency:
+  group: release-asyncgh
+  cancel-in-progress: false
+
 jobs:
   publish:
     timeout-minutes: 5

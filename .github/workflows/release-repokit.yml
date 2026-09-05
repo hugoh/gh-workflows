@@ -11,6 +11,10 @@ on: # yamllint disable-line rule:truthy
       - repokit/**
       - .github/workflows/release-repokit.yml
 
+concurrency:
+  group: release-repokit
+  cancel-in-progress: false
+
 jobs:
   publish:
     timeout-minutes: 5
