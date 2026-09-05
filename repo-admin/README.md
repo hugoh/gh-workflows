@@ -76,11 +76,18 @@ uv run repo_admin.py <resource> <verb> [repo ...] \
   yields none to sample (the latest PR's workflow runs aged out, a stale
   pre-CI PR bumped to the top by a comment) keeps its existing contexts
   instead of having the merge gate cleared; `--clear-stale-checks` drops
-  them for a repo that genuinely retired its CI. Private repos on a plan without
-  branch-protection access are reported, not failed. Repos listed in
+  them for a repo that genuinely retired its CI. A private repo on a plan
+  without classic branch-protection access instead gets an equivalent branch
+  **ruleset** (rulesets work on Free for private repos): required checks pinned
+  to the Actions app, PR required, no force-push, no deletion, with the account
+  owner (repo-admin role) as a bypass actor so direct pushes to the default
+  branch still work — the deliberate difference from the public repos, whose
+  classic protection has no bypass. A plan-gated repo with nothing to sample yet
+  is still just reported, as is one that already has a branch ruleset without a
+  checks rule (add the gate there by hand). Repos listed in
   `config/branch-protection-exclude.txt` (e.g. `homebrew-tap`, which has no
-  CI/PR workflow) are always skipped; override per-run with
-  `GH_BRANCH_PROTECTION_EXCLUDE`.
+  CI/PR workflow) are skipped entirely — no classic protection, no ruleset;
+  override per-run with `GH_BRANCH_PROTECTION_EXCLUDE`.
 - **`security sync [--dry-run]`** — enables Dependabot vulnerability
   alerts (all repos, free), plus secret scanning, secret scanning push
   protection, Dependabot security updates, private vulnerability
