@@ -4,10 +4,11 @@ a live progress bar, silenced when stdout isn't a terminal.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import Any
 
 from rich.console import Console
-from rich.progress import Progress
+from rich.progress import Progress, ProgressColumn
 
 from .status import Status
 
@@ -22,13 +23,30 @@ _STATUS_DISPLAY: dict[Status, tuple[str, str]] = {
 }
 
 
-def progress_bar(*, console: Console = console, **kwargs: Any) -> Progress:
+def progress_bar(
+    *columns: str | ProgressColumn, console: Console = console, **kwargs: Any
+) -> Progress:
     """A Progress bound to `console` (module-level `console` by default),
     silenced when its console isn't a terminal -- e.g. `cmd > file` or piping
     into another command -- so its status text (which Progress still renders as
     plain lines even without a tty) doesn't end up mixed into redirected output.
     """
-    return Progress(console=console, disable=not console.is_terminal, **kwargs)
+    return Progress(
+        *columns, console=console, disable=not console.is_terminal, **kwargs
+    )
+
+
+def progress_description(active: Collection[str], *, max_names: int = 3) -> str:
+    """Progress-bar label naming the targets currently being worked on: the
+    first `max_names` sorted names plus a "+N more" overflow count, or a plain
+    idle label when nothing is in flight.
+    """
+    if not active:
+        return "Processing…"
+    names = sorted(active)
+    shown = ", ".join(names[:max_names])
+    extra = len(names) - max_names
+    return f"Processing {shown}" + (f" +{extra} more" if extra > 0 else "")
 
 
 def result_line(name: str, detail: str, status: Status) -> str:

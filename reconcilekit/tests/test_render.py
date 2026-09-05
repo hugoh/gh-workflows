@@ -1,7 +1,7 @@
 import io
 
 import pytest
-from reconcilekit.render import _STATUS_DISPLAY
+from reconcilekit.render import _STATUS_DISPLAY, progress_description
 from rich.console import Console
 
 from reconcilekit import Status, print_status, progress_bar, result_line
@@ -40,6 +40,19 @@ def test_status_display_pairs_are_unique_per_status():
     # color.
     pairs = list(_STATUS_DISPLAY.values())
     assert len(pairs) == len(set(pairs)) == len(list(Status))
+
+
+def test_progress_description_idle_when_nothing_active():
+    assert progress_description(set()) == "Processing…"
+
+
+def test_progress_description_names_the_single_active_target():
+    assert progress_description({"repo-a"}) == "Processing repo-a"
+
+
+def test_progress_description_sorts_and_caps_names_with_overflow_count():
+    active = {"repo-d", "repo-b", "repo-a", "repo-c"}
+    assert progress_description(active) == "Processing repo-a, repo-b, repo-c +1 more"
 
 
 def test_progress_bar_disabled_when_console_is_not_a_terminal():

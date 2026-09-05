@@ -10,7 +10,9 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Generic, Protocol, TypeVar
 
-from .render import console, print_status, progress_bar
+from rich.progress import MofNCompleteColumn, Progress
+
+from .render import console, print_status, progress_bar, progress_description
 from .status import QUIET_STATUSES, Status
 
 DEFAULT_JOBS = 6
@@ -112,14 +114,19 @@ async def run_parallel(
     results: list[R] = []
     failed_names: list[str] = []
     unchanged_count = 0
+    active: set[str] = set()
     sem = asyncio.Semaphore(jobs)
 
-    with progress_bar() as progress:
-        task = progress.add_task("Processing...", total=len(targets))
+    with progress_bar(
+        *Progress.get_default_columns(), MofNCompleteColumn()
+    ) as progress:
+        task = progress.add_task(progress_description(active), total=len(targets))
 
         async def call(target: Target) -> None:
             nonlocal unchanged_count
             async with sem:
+                active.add(target.name)
+                progress.update(task, description=progress_description(active))
                 try:
                     result = await worker(target)
                 except Exception as exc:  # noqa: BLE001 -- collected below, not swallowed
@@ -132,7 +139,9 @@ async def run_parallel(
                         print_status(result.status, result.line)
                     results.append(result)
                 finally:
+                    active.discard(target.name)
                     progress.advance(task)
+                    progress.update(task, description=progress_description(active))
 
         async with asyncio.TaskGroup() as tg:
             for target in targets:
