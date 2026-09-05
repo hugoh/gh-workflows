@@ -54,18 +54,9 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Install cocogitto
-        env:
-          # renovate: datasource=github-releases depName=cocogitto/cocogitto
-          COG_VERSION: 7.0.0
-        run: |
-          set -euo pipefail
-          ver="$COG_VERSION"
-          mkdir -p "$RUNNER_TEMP/bin"
-          curl -sSfL --retry 3 --retry-all-errors --retry-delay 5 \
-            "https://github.com/cocogitto/cocogitto/releases/download/${ver}/cocogitto-${ver}-x86_64-unknown-linux-musl.tar.gz" \
-            | tar -xz -C "$RUNNER_TEMP/bin" cog
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - uses: cocogitto/cocogitto-action@9a9fe03b31c47444290c0d7f9b1ee1b44ee13f20 # v4.1.0
+        with:
+          command: "--version"
 
       - name: Release
         id: release
@@ -76,8 +67,6 @@ jobs:
           MAJOR_TAG: ${{ inputs.major-tag }}
         run: |
           set -euo pipefail
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
 
           # Canonical fleet cog config — release-time only, carried here so no
           # consumer repo needs its own cog.toml. `disable_bump_commit` means
