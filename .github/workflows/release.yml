@@ -54,47 +54,23 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - uses: cocogitto/cocogitto-action@9a9fe03b31c47444290c0d7f9b1ee1b44ee13f20 # v4.1.0
-        with:
-          command: "--version"
+      - id: bump
+        if: inputs.tag == ''
+        uses: hugoh/gh-workflows/cog-bump@1d2a18056f2122b7f49c2e8aacb48c40cb6eaab9 # v1.24.0
 
-      - name: Release
+      - name: Create a GitHub release
         id: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          INPUT_TAG: ${{ inputs.tag }}
+          TAG: ${{ inputs.tag != '' && inputs.tag || steps.bump.outputs.tag }}
           INPUT_NOTES: ${{ inputs.notes }}
           MAJOR_TAG: ${{ inputs.major-tag }}
         run: |
           set -euo pipefail
-
-          # Canonical fleet cog config — release-time only, carried here so no
-          # consumer repo needs its own cog.toml. `disable_bump_commit` means
-          # `cog bump` only creates the tag: no commit, no CHANGELOG.md file.
-          cat > "$RUNNER_TEMP/cog.toml" <<'EOF'
-          tag_prefix = "v"
-          disable_changelog = true
-          disable_bump_commit = true
-          ignore_merge_commits = true
-
-          [commit_types.perf]
-          bump_patch = true
-          EOF
-
-          if [ -n "$INPUT_TAG" ]; then
-            TAG="$INPUT_TAG"
-          else
-            cog --config "$RUNNER_TEMP/cog.toml" bump --auto || true
-            TAG="$(git tag --points-at HEAD | grep -E '^v[0-9]' | head -1 || true)"
-            if [ -z "$TAG" ]; then
-              echo "no releasable commits — nothing to do"
-              exit 0
-            fi
-            git remote set-url origin \
-              "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}"
-            git push origin "refs/tags/${TAG}"
+          if [ -z "$TAG" ]; then
+            echo "nothing to release"
+            exit 0
           fi
-
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
           if [ -n "$INPUT_NOTES" ]; then
@@ -105,7 +81,7 @@ jobs:
 
           if [ "$MAJOR_TAG" = "true" ]; then
             major="${TAG%%.*}"
-            sha="$(git rev-list -n1 "$TAG")"
+            sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha')"
             gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/${major}" \
               -f "sha=${sha}" -F force=true \
             || gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
