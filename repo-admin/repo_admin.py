@@ -51,9 +51,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import copy
 import enum
 import re
 import sys
+from dataclasses import dataclass, field
+from fnmatch import fnmatch
 
 import activity
 import lib
@@ -90,6 +94,11 @@ class Tag(enum.StrEnum):
 
     APPLIED = "applied"
     APPLIED_NO_CHECKS = "applied_no_checks"
+    APPLIED_RULESET = "applied_ruleset"
+    APPLIED_BOTH = "applied_both"
+    RULESET_EVALUATE_MODE = "ruleset_evaluate_mode"
+    MULTIPLE_RULESETS = "multiple_rulesets"
+    ORG_RULESET = "org_ruleset"
     SKIPPED_NO_PLAN = "skipped_no_plan"
     UNAVAILABLE = "unavailable"
 
@@ -492,12 +501,28 @@ async def cmd_security_sync(args: argparse.Namespace) -> int:
 # ("Analyze (...)" jobs) and Advanced Security posts a "github-advanced-security"
 # check, both from `dynamic/...` workflow paths rather than a file in the repo's
 # `.github/workflows/`. Each check run links to its workflow run via a shared
-# check-suite id, so contexts are kept only when that suite belongs to a
-# workflow run whose path is under `.github/workflows/`.
+# check-suite id, so a context is kept when either (1) that suite belongs to a
+# workflow run whose path is under `.github/workflows/`, or (2) the check name's
+# first `" / "`-segment names a job in one of the repo's own workflow files that
+# calls a reusable workflow via `uses:`. Signal 2 covers `hk / lint`-style
+# checks: a caller job `hk` doing `uses: hugoh/gh-workflows/.../hk.yml` can have
+# its check-run attributed to a child workflow run whose path points outside
+# `.github/workflows/`, which signal 1 alone would drop as third-party.
+#
+# The required-checks gate can live in classic branch protection, in a
+# repository ruleset's `required_status_checks` rule, or both -- ChecksTarget
+# abstracts over that. A ruleset is adopted (its checks rule updated) when it is
+# active/evaluate, targets the default branch, and already has a
+# `required_status_checks` rule; the whole ruleset object is round-tripped on
+# write so `bypass_actors`, `conditions`, and other rules are preserved
+# verbatim. `evaluate`-mode, multiple-matching, and org-level rulesets are
+# reported (Status.LIMITED) rather than guessed at. New repos with neither
+# mechanism still get classic protection.
 #
 # Private repos on a plan that doesn't expose branch protection return a 403
 # ("Upgrade to GitHub Pro..."); those are collected and reported at the end
-# rather than treated as a hard failure.
+# rather than treated as a hard failure (unless a ruleset already enforces the
+# gate, in which case that ruleset is used).
 # ---------------------------------------------------------------------------
 
 
@@ -590,7 +615,67 @@ async def _own_workflow_check_suite_ids(owner: str, name: str, sha: str) -> set[
     }
 
 
-async def _check_run_contexts(owner: str, name: str, shas: list[str]) -> list[str]:
+async def _own_reusable_job_prefixes(owner: str, name: str, ref: str) -> set[str]:
+    """Job keys / names of jobs in the repo's own `.github/workflows/*.yml`
+    that call a reusable workflow via `uses:`.
+
+    A caller job `hk` that does `uses: hugoh/gh-workflows/.github/workflows/hk.yml`
+    surfaces on a PR as a check named `hk / <reusable job>` (e.g. `hk / lint`).
+    GitHub attributes that check-run's check-suite inconsistently -- sometimes to
+    the caller run under `.github/workflows/`, sometimes to a child run whose
+    path points at the reusable workflow's own repo -- so `_check_run_contexts`
+    also accepts a check as "the repo's own" when its first `" / "`-segment is
+    one of these prefixes.
+    """
+    listing = await api_raw(
+        "GET",
+        f"/repos/{owner}/{name}/contents/.github/workflows",
+        params={"ref": ref},
+    )
+    if listing.status_code == 404:
+        return set()
+    if not listing.is_success:
+        raise GhError(error_message(listing), status_code=listing.status_code)
+    entries = listing.json()
+    if not isinstance(entries, list):
+        return set()
+
+    prefixes: set[str] = set()
+    for entry in entries:
+        filename = entry.get("name", "")
+        if entry.get("type") != "file" or not filename.endswith((".yml", ".yaml")):
+            continue
+        blob = await api_json(
+            "GET",
+            f"/repos/{owner}/{name}/contents/.github/workflows/{filename}",
+            params={"ref": ref},
+        )
+        try:
+            content = base64.b64decode(blob["content"]).decode("utf-8")
+            doc = yaml.safe_load(content) or {}
+        except (ValueError, yaml.YAMLError):
+            continue
+        for key, job in (doc.get("jobs") or {}).items():
+            if isinstance(job, dict) and isinstance(job.get("uses"), str):
+                prefixes.add(key)
+                if isinstance(job.get("name"), str):
+                    prefixes.add(job["name"])
+    return prefixes
+
+
+def _own_reusable_check(name: str, own_reusable_job_prefixes: set[str]) -> bool:
+    stripped = re.sub(r" \(.+\)$", "", name)
+    if " / " not in stripped:
+        return False
+    return stripped.split(" / ", 1)[0] in own_reusable_job_prefixes
+
+
+async def _check_run_contexts(
+    owner: str,
+    name: str,
+    shas: list[str],
+    own_reusable_job_prefixes: set[str] | None = None,
+) -> list[str]:
     """Contexts to require, sampled from the most recent PR's head commit.
 
     A job that calls a reusable workflow via `uses:` alongside a `needs:`
@@ -604,9 +689,15 @@ async def _check_run_contexts(owner: str, name: str, shas: list[str]) -> list[st
     alias ("<name> / ...") if one shows up, actually run, anywhere in a
     short recent-PR window.
     """
+    own_reusable_job_prefixes = own_reusable_job_prefixes or set()
     latest_runs = await _github_actions_check_runs(owner, name, shas[0])
     own_suites = await _own_workflow_check_suite_ids(owner, name, shas[0])
-    latest_runs = [run for run in latest_runs if run["check_suite"]["id"] in own_suites]
+    latest_runs = [
+        run
+        for run in latest_runs
+        if run["check_suite"]["id"] in own_suites
+        or _own_reusable_check(run["name"], own_reusable_job_prefixes)
+    ]
     contexts = {run["name"] for run in latest_runs}
     suspect = {
         run["name"]
@@ -655,6 +746,196 @@ def _gate_sibling(prefix: str, job: str) -> set[str]:
     return {f"{prefix}gate", f"{prefix}{job}-gate", f"{prefix}{job} / gate"}
 
 
+# The GitHub Actions app id on github.com. Pinning a ruleset's required-check
+# context to it is the ruleset-mode equivalent of classic mode's "only the
+# github-actions app can satisfy this gate" filter.
+GITHUB_ACTIONS_APP_ID = 15368
+
+_RULESET_ROUND_TRIP_FIELDS = (
+    "name",
+    "target",
+    "enforcement",
+    "conditions",
+    "rules",
+    "bypass_actors",
+)
+
+
+def _ruleset_ref_matches(conditions: dict, default_branch: str) -> bool:
+    ref = (conditions or {}).get("ref_name") or {}
+    target = f"refs/heads/{default_branch}"
+
+    def hit(pattern: str) -> bool:
+        if pattern in ("~ALL", "~DEFAULT_BRANCH"):
+            return True
+        return pattern == target or fnmatch(target, pattern)
+
+    include = ref.get("include") or []
+    exclude = ref.get("exclude") or []
+    return any(hit(p) for p in include) and not any(hit(p) for p in exclude)
+
+
+def _ruleset_checks_rule(ruleset: dict) -> dict | None:
+    for rule in ruleset.get("rules") or []:
+        if rule.get("type") == "required_status_checks":
+            return rule
+    return None
+
+
+def _ruleset_contexts(ruleset: dict) -> list[str]:
+    rule = _ruleset_checks_rule(ruleset)
+    if rule is None:
+        return []
+    checks = (rule.get("parameters") or {}).get("required_status_checks") or []
+    return sorted(entry["context"] for entry in checks)
+
+
+def _ruleset_up_to_date(ruleset: dict, contexts: list[str]) -> bool:
+    rule = _ruleset_checks_rule(ruleset)
+    if rule is None:
+        return False
+    params = rule.get("parameters") or {}
+    return (
+        _ruleset_contexts(ruleset) == sorted(contexts)
+        and params.get("strict_required_status_checks_policy") is True
+    )
+
+
+def ruleset_checks_payload(ruleset: dict, contexts: list[str]) -> dict:
+    """The whole-object PUT body for a ruleset with only its
+    `required_status_checks` rule mutated to require `contexts`.
+
+    Everything else -- `bypass_actors`, `conditions`, other rule types, name,
+    enforcement -- is carried through verbatim from the fetched object.
+    """
+    updated = copy.deepcopy(ruleset)
+    rule = _ruleset_checks_rule(updated)
+    if rule is None:
+        raise ValueError("ruleset has no required_status_checks rule")
+    params = rule.setdefault("parameters", {})
+    existing = params.get("required_status_checks") or []
+    prev_by_context = {entry["context"]: entry for entry in existing}
+    changing = sorted(prev_by_context) != sorted(contexts)
+
+    new_entries = []
+    for context in sorted(contexts):
+        prev = prev_by_context.get(context)
+        if prev is not None and "integration_id" in prev:
+            new_entries.append(
+                {"context": context, "integration_id": prev["integration_id"]}
+            )
+        elif changing:
+            new_entries.append(
+                {"context": context, "integration_id": GITHUB_ACTIONS_APP_ID}
+            )
+        else:
+            new_entries.append({"context": context})
+    params["required_status_checks"] = new_entries
+    params["strict_required_status_checks_policy"] = True
+    return {key: updated[key] for key in _RULESET_ROUND_TRIP_FIELDS if key in updated}
+
+
+@dataclass
+class ChecksTarget:
+    """Where a repo's required-status-check gate is enforced -- classic branch
+    protection, one or more repository rulesets, both, or neither.
+    """
+
+    classic: dict | None
+    repo_rulesets: list[dict] = field(default_factory=list)
+    org_rulesets: list[dict] = field(default_factory=list)
+
+    @property
+    def mechanism(self) -> str:
+        has_classic = self.classic is not None
+        has_ruleset = bool(self.repo_rulesets) or bool(self.org_rulesets)
+        if has_classic and has_ruleset:
+            return "both"
+        if has_ruleset:
+            return "ruleset"
+        if has_classic:
+            return "classic"
+        return "none"
+
+    def current_contexts(self) -> list[str]:
+        contexts = set(current_protection_contexts(self.classic))
+        for ruleset in [*self.repo_rulesets, *self.org_rulesets]:
+            contexts.update(_ruleset_contexts(ruleset))
+        return sorted(contexts)
+
+
+def checks_target_up_to_date(target: ChecksTarget, contexts: list[str]) -> bool:
+    mechanism = target.mechanism
+    if mechanism in ("classic", "both", "none") and not branch_protection_up_to_date(
+        target.classic, contexts
+    ):
+        return False
+    if mechanism in ("ruleset", "both"):
+        for ruleset in target.repo_rulesets:
+            if not _ruleset_up_to_date(ruleset, contexts):
+                return False
+    for ruleset in target.org_rulesets:
+        if _ruleset_contexts(ruleset) != sorted(contexts):
+            return False
+    return True
+
+
+async def _matching_rulesets(
+    owner: str, name: str, default_branch: str
+) -> tuple[list[dict], list[dict]]:
+    """`(repo_rulesets, org_rulesets)` -- active/evaluate branch rulesets that
+    target the default branch and carry a `required_status_checks` rule,
+    fetched as full objects. Org-level rulesets can't be edited by a
+    repo-scoped PUT; they're returned separately so callers can report them.
+    """
+    listing = await api_raw(
+        "GET",
+        f"/repos/{owner}/{name}/rulesets",
+        params={"includes_parents": "true", "targets": "branch"},
+    )
+    if listing.status_code in (403, 404):
+        return [], []
+    if not listing.is_success:
+        raise GhError(error_message(listing), status_code=listing.status_code)
+    summaries = listing.json()
+    if not isinstance(summaries, list):
+        return [], []
+
+    repo_rulesets: list[dict] = []
+    org_rulesets: list[dict] = []
+    for summary in summaries:
+        if summary.get("enforcement") not in ("active", "evaluate"):
+            continue
+        detail = await api_raw("GET", f"/repos/{owner}/{name}/rulesets/{summary['id']}")
+        if not detail.is_success:
+            continue
+        ruleset = detail.json()
+        if not isinstance(ruleset, dict):
+            continue
+        ruleset.setdefault("id", summary.get("id"))
+        if not _ruleset_ref_matches(ruleset.get("conditions") or {}, default_branch):
+            continue
+        if _ruleset_checks_rule(ruleset) is None:
+            continue
+        source_type = ruleset.get("source_type") or summary.get("source_type")
+        if source_type == "Organization":
+            org_rulesets.append(ruleset)
+        else:
+            repo_rulesets.append(ruleset)
+    return repo_rulesets, org_rulesets
+
+
+async def _put_ruleset_checks(
+    owner: str, name: str, ruleset: dict, contexts: list[str]
+) -> None:
+    payload = ruleset_checks_payload(ruleset, contexts)
+    response = await api_raw(
+        "PUT", f"/repos/{owner}/{name}/rulesets/{ruleset['id']}", json=payload
+    )
+    if not response.is_success:
+        raise GhError(error_message(response), status_code=response.status_code)
+
+
 def _plan_gated_result(repo: Repo, *, tag: Tag | None = None) -> RepoResult:
     status = Status.LIMITED_UNCHANGED
     detail = "private repo, plan does not allow branch protection"
@@ -678,19 +959,21 @@ def make_branch_protection_worker(
         # than having the merge gate silently cleared; --clear-stale-checks
         # opts into dropping them for a repo that genuinely retired its CI.
         pr_head_shas = await _recent_pr_head_shas(owner, repo.name)
+        own_reusable_job_prefixes = await _own_reusable_job_prefixes(
+            owner, repo.name, repo.default_branch
+        )
         contexts: list[str] = []
         if pr_head_shas:
-            contexts = await _check_run_contexts(owner, repo.name, pr_head_shas)
+            contexts = await _check_run_contexts(
+                owner, repo.name, pr_head_shas, own_reusable_job_prefixes
+            )
 
         protection_response = await api_raw(
             "GET",
             f"/repos/{owner}/{repo.name}/branches/{repo.default_branch}/protection",
         )
-        if protection_response.status_code == 403:
-            return _plan_gated_result(
-                repo, tag=Tag.SKIPPED_NO_PLAN if not dry_run else None
-            )
-        if protection_response.status_code == 404:
+        plan_gated = protection_response.status_code == 403
+        if plan_gated or protection_response.status_code == 404:
             current = None
         elif protection_response.is_success:
             current = protection_response.json()
@@ -699,7 +982,25 @@ def make_branch_protection_worker(
                 error_message(protection_response),
                 status_code=protection_response.status_code,
             )
-        existing = current_protection_contexts(current)
+
+        repo_rulesets, org_rulesets = await _matching_rulesets(
+            owner, repo.name, repo.default_branch
+        )
+        target = ChecksTarget(
+            classic=current,
+            repo_rulesets=repo_rulesets,
+            org_rulesets=org_rulesets,
+        )
+        mechanism = target.mechanism
+
+        # A plan that gates classic protection only matters when no ruleset
+        # already enforces the checks gate; with one, that's the write target.
+        if plan_gated and mechanism != "ruleset":
+            return _plan_gated_result(
+                repo, tag=Tag.SKIPPED_NO_PLAN if not dry_run else None
+            )
+
+        existing = target.current_contexts()
         stale_retained = False
         pending_note = None
         if not pr_head_shas:
@@ -718,7 +1019,7 @@ def make_branch_protection_worker(
                 "requiring none for now"
             )
 
-        up_to_date = branch_protection_up_to_date(current, contexts)
+        up_to_date = checks_target_up_to_date(target, contexts)
 
         require_desc = ", ".join(contexts) if contexts else "(none yet)"
         suffix = f"; {pending_note}" if pending_note else ""
@@ -727,6 +1028,100 @@ def make_branch_protection_worker(
         unchanged_status = (
             Status.LIMITED_UNCHANGED if stale_retained else Status.UNCHANGED
         )
+
+        if mechanism in ("ruleset", "both"):
+            ruleset_ids = sorted(str(rs["id"]) for rs in repo_rulesets)
+            mech_label = "ruleset" if mechanism == "ruleset" else "classic + ruleset"
+
+            if len(repo_rulesets) > 1:
+                detail = (
+                    "multiple rulesets enforce required checks: "
+                    f"{', '.join(ruleset_ids)} -- resolve manually{suffix}"
+                )
+                return RepoResult(
+                    repo,
+                    result_line(repo.name, detail, Status.LIMITED_UNCHANGED),
+                    Status.LIMITED_UNCHANGED,
+                    tag=None if dry_run else Tag.MULTIPLE_RULESETS,
+                )
+
+            if org_rulesets and not up_to_date:
+                org_ids = ", ".join(str(rs["id"]) for rs in org_rulesets)
+                detail = (
+                    f"required checks enforced by an org ruleset {org_ids}; "
+                    f"not managed here{suffix}"
+                )
+                return RepoResult(
+                    repo,
+                    result_line(repo.name, detail, Status.LIMITED_UNCHANGED),
+                    Status.LIMITED_UNCHANGED,
+                    tag=None if dry_run else Tag.ORG_RULESET,
+                )
+
+            evaluate_mode = any(
+                rs.get("enforcement") == "evaluate" for rs in repo_rulesets
+            )
+            applied_tag = (
+                Tag.RULESET_EVALUATE_MODE
+                if evaluate_mode
+                else (
+                    Tag.APPLIED_RULESET if mechanism == "ruleset" else Tag.APPLIED_BOTH
+                )
+            )
+            limited = evaluate_mode or stale_retained
+            result_ok = Status.LIMITED if limited else Status.OK
+            result_unchanged = Status.LIMITED_UNCHANGED if limited else Status.UNCHANGED
+            eval_note = (
+                "; ruleset in evaluate mode, not enforcing" if evaluate_mode else ""
+            )
+
+            if dry_run:
+                if up_to_date:
+                    detail = f"{mech_label}: {require_desc}{suffix}{eval_note}"
+                    return RepoResult(
+                        repo,
+                        result_line(repo.name, detail, result_unchanged),
+                        result_unchanged,
+                    )
+                was_desc = ", ".join(existing) if existing else "(none yet)"
+                detail = (
+                    f"would update {mech_label} -> require: {require_desc} "
+                    f"(was: {was_desc}){suffix}{eval_note}"
+                )
+                return RepoResult(
+                    repo, result_line(repo.name, detail, result_ok), result_ok
+                )
+
+            if up_to_date:
+                detail = f"{mech_label}: {require_desc}{suffix}{eval_note}"
+                return RepoResult(
+                    repo,
+                    result_line(repo.name, detail, result_unchanged),
+                    result_unchanged,
+                    tag=applied_tag,
+                )
+
+            if mechanism == "both":
+                classic_put = await api_raw(
+                    "PUT",
+                    f"/repos/{owner}/{repo.name}/branches/{repo.default_branch}/protection",
+                    json=branch_protection_payload(contexts),
+                )
+                if not classic_put.is_success and classic_put.status_code != 403:
+                    raise GhError(
+                        error_message(classic_put),
+                        status_code=classic_put.status_code,
+                    )
+            for ruleset in repo_rulesets:
+                await _put_ruleset_checks(owner, repo.name, ruleset, contexts)
+
+            detail = f"protected via {mech_label} ({require_desc}){suffix}{eval_note}"
+            return RepoResult(
+                repo,
+                result_line(repo.name, detail, result_ok),
+                result_ok,
+                tag=applied_tag,
+            )
 
         if dry_run:
             if up_to_date:
@@ -798,9 +1193,24 @@ async def cmd_protection_sync(args: argparse.Namespace) -> int:
     skipped_no_plan = sorted(
         r.repo.name for r in results if r.tag == Tag.SKIPPED_NO_PLAN
     )
+    ruleset_enforced = sorted(
+        r.repo.name for r in results if r.tag in (Tag.APPLIED_RULESET, Tag.APPLIED_BOTH)
+    )
+    needs_attention = sorted(
+        r.repo.name
+        for r in results
+        if r.tag in (Tag.MULTIPLE_RULESETS, Tag.ORG_RULESET, Tag.RULESET_EVALUATE_MODE)
+    )
     print()
     print("Summary:")
     print(f"  Protected (with required status checks): {len(applied)}")
+    print(
+        f"  Enforced via a repository ruleset: {' '.join(ruleset_enforced) or 'none'}"
+    )
+    print(
+        "  Needs manual attention (multiple/org/evaluate-mode rulesets): "
+        f"{' '.join(needs_attention) or 'none'}"
+    )
     print(
         "  Protected (no required status checks yet -- no PRs / no check runs "
         f"seen): {' '.join(applied_no_checks) or 'none'}"

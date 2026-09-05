@@ -57,7 +57,16 @@ uv run repo_admin.py <resource> <verb> [repo ...] \
   for why), limited to jobs from the repo's own `.github/workflows/` files:
   third-party apps and GitHub-managed setups (CodeQL default setup's
   "Analyze (...)", the "github-advanced-security" check) never become merge
-  gates. `--dry-run` diffs each repo's current protection against the
+  gates. A `hk / lint`-style check produced by a job that calls a reusable
+  workflow via `uses:` is recognised as the repo's own (matched by job
+  name against the workflow files), so a C2-migrated repo no longer keeps a
+  stale `check` context. The required-checks gate is read and written
+  wherever it lives — classic branch protection, a repository ruleset's
+  `required_status_checks` rule, or both; a ruleset is updated via a
+  whole-object round-trip PUT that preserves `bypass_actors`, `conditions`,
+  and other rules. `evaluate`-mode, multiple-matching, and org-level
+  rulesets are reported for manual attention rather than guessed at.
+  `--dry-run` diffs each repo's current protection against the
   baseline and prints "unchanged: ..." or "would update", rather than just
   showing what would be required. A repo that already requires checks but
   yields none to sample (the latest PR's workflow runs aged out, a stale
