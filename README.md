@@ -30,8 +30,8 @@ Packages ([details](#packages)):
 ## Actions
 
 - **`setup`** — checks out the repo and sets up mise
-- **`hk-check`** — runs `hk check --no-progress --profile ci --all`, dumping
-  the log on failure
+- **`hk-check`** — runs `hk check --no-progress --profile ci --all --no-fail-fast`
+  (every check runs even after one fails, so all failures surface in one pass)
 - **`tool-bumps`** — emits a `tools` output: a JSON map of which `mise.toml`
   `[tools]` entries changed since a base ref, for gating downstream jobs on a
   specific tool's version bump. Needs the repo checked out with full history
