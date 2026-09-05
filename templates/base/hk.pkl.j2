@@ -1,0 +1,41 @@
+amends "package://github.com/jdx/hk/releases/download/v<< hk_version >>/hk@<< hk_version >>#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v<< hk_version >>/hk@<< hk_version >>#/Builtins.pkl"
+import "package://github.com/hugoh/hk-config/releases/download/v<< hk_config_version >>/hk-config@<< hk_config_version >>#/base.pkl" as Base
+
+min_hk_version = Base.min_hk_version
+
+local linters = new Mapping<String, Step> {
+    ...Base.base
+<% for group in hk_groups %>
+    ...Base.<< group >>
+<% endfor %>
+<% if tests == "python" %>
+    ["tests"] = {
+        check = "python3 -m unittest discover -p 'test_*.py'"
+        profiles = List("ci")
+    }
+<% endif %>
+}
+
+hooks {
+    ["pre-commit"] {
+        fix = true
+        stash = "git"
+        steps = linters
+    }
+    ["pre-push"] {
+        steps = linters
+    }
+    ["check"] {
+        steps = linters
+    }
+    ["fix"] {
+        fix = true
+        steps = linters
+    }
+    ["commit-msg"] {
+        steps = new Mapping<String, Step> {
+            ...Base.commit_msg
+        }
+    }
+}

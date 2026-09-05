@@ -32,7 +32,7 @@ _MONTH_DAYS = 30
 
 
 def _parse_dt(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return datetime.fromisoformat(value)
 
 
 async def _fetch_repo_commit_dates(

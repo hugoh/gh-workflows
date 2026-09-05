@@ -6,6 +6,7 @@ dependencies = [
   "asyncgh",
   "httpx2>=2.10",
   "hugoh-repokit",
+  "jinja2>=3.1",
   "pynacl>=1.5",
   "pyyaml>=6",
   "reconcilekit",

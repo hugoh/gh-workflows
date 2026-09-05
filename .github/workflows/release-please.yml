@@ -9,6 +9,10 @@ on: # yamllint disable-line rule:truthy
 permissions:
   contents: read
 
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
 jobs:
   release-please:
     timeout-minutes: 5

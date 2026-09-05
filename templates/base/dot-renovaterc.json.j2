@@ -1,0 +1,18 @@
+<% if action %>
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>hugoh/renovate-config"],
+  "packageRules": [
+    {
+      "matchManagers": ["github-actions"],
+      "matchFileNames": ["action.yml"],
+      "semanticCommitType": "fix"
+    }
+  ]
+}
+<% else %>
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>hugoh/renovate-config"]
+}
+<% endif %>

@@ -11,6 +11,10 @@ on: # yamllint disable-line rule:truthy
       - reconcilekit/**
       - .github/workflows/release-reconcilekit.yml
 
+concurrency:
+  group: release-reconcilekit
+  cancel-in-progress: false
+
 jobs:
   publish:
     timeout-minutes: 5
