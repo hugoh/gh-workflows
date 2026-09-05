@@ -746,6 +746,29 @@ def _gate_sibling(prefix: str, job: str) -> set[str]:
     return {f"{prefix}gate", f"{prefix}{job}-gate", f"{prefix}{job} / gate"}
 
 
+def _reconcile_reusable_prefix(sampled: list[str], existing: list[str]) -> list[str]:
+    """A `workflow_call` check is reported as `<caller job> / <reusable job>`
+    on most runs but sometimes bare `<reusable job>` -- a GitHub inconsistency
+    across runs of the same workflow. When a freshly-sampled context is the
+    prefix-stripped (or prefixed) form of one already required, keep the
+    existing spelling: switching the merge gate to the bare name strands it
+    pending, since `main`'s runs report the prefixed name.
+    """
+    if not sampled or not existing:
+        return sorted(set(sampled))
+    out: list[str] = []
+    for ctx in sampled:
+        if ctx in existing:
+            out.append(ctx)
+            continue
+        equiv = next(
+            (e for e in existing if e.endswith(f" / {ctx}") or ctx.endswith(f" / {e}")),
+            None,
+        )
+        out.append(equiv if equiv is not None else ctx)
+    return sorted(set(out))
+
+
 # The GitHub Actions app id on github.com. Pinning a ruleset's required-check
 # context to it is the ruleset-mode equivalent of classic mode's "only the
 # github-actions app can satisfy this gate" filter.
@@ -1003,6 +1026,16 @@ def make_branch_protection_worker(
         existing = target.current_contexts()
         stale_retained = False
         pending_note = None
+        if contexts and existing:
+            reconciled = _reconcile_reusable_prefix(contexts, existing)
+            if reconciled != sorted(set(contexts)):
+                pending_note = (
+                    f"kept {', '.join(existing)} over sampled "
+                    f"{', '.join(sorted(set(contexts)))} "
+                    "(reusable-workflow check-name inconsistency across runs)"
+                )
+                contexts = reconciled
+                stale_retained = True
         if not pr_head_shas:
             pending_note = "no pull requests found yet, requiring none for now"
         elif not contexts and existing and not clear_stale_checks:
