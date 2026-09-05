@@ -1,2 +1,5 @@
+[tool.ruff]
+target-version = "py311"
+
 [tool.uv.workspace]
 members = ["repo-admin", "reconcilekit", "asyncgh", "repokit"]
