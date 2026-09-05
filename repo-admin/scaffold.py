@@ -205,13 +205,25 @@ def _enabled_overlays(args: argparse.Namespace) -> list[str]:
     return [name for name, flag in OVERLAYS if not flag or getattr(args, flag)]
 
 
+def _forced(dest_rel: Path, force: list[str] | None) -> bool:
+    """`--force` (no paths) overwrites everything; `--force PATH...` overwrites
+    only those dest paths (suffix match, so `.github/workflows/hk.yml` or just
+    `hk.yml` both work); absent → nothing."""
+    if force is None:
+        return False
+    if not force:  # bare --force
+        return True
+    s = str(dest_rel)
+    return any(s == p or s.endswith("/" + p) for p in force)
+
+
 def _render_overlay(
     env: jinja2.Environment,
     overlay: str,
     ctx: dict[str, object],
     target: Path,
     *,
-    force: bool,
+    force: list[str] | None,
     dry_run: bool,
 ) -> tuple[list[Path], list[Path]]:
     written: list[Path] = []
@@ -220,7 +232,7 @@ def _render_overlay(
     for tpl in sorted(root.rglob("*.j2")):
         dest_rel = _dest_relpath(overlay, tpl)
         dest = target / dest_rel
-        if dest.exists() and not force:
+        if dest.exists() and not _forced(dest_rel, force):
             skipped.append(dest_rel)
             continue
         template = env.get_template(str(tpl.relative_to(TEMPLATES)))
@@ -358,6 +370,12 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
         default="[ci, hk]",
         help="workflow_run watch list (with --rerun-transient)",
     )
-    p.add_argument("--force", action="store_true", help="overwrite existing files")
+    p.add_argument(
+        "--force",
+        nargs="*",
+        metavar="PATH",
+        help="overwrite existing files: bare = all; with PATHs = only those "
+        "(suffix match, e.g. .github/workflows/hk.yml)",
+    )
     p.add_argument("--no-pin", action="store_true", help="don't run pinact afterwards")
     p.add_argument("--dry-run", action="store_true", help="show what would be written")
