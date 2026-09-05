@@ -1,4 +1,5 @@
 import argparse
+import base64
 
 import repo_admin
 from lib import GhError, Repo, Status
@@ -837,11 +838,13 @@ def _branch_protection_worker(
     status_code=200,
     track_calls=False,
     clear_stale_checks=False,
+    repo_rulesets=(),
+    org_rulesets=(),
 ):
     async def fake_shas(owner, name):
         return list(shas)
 
-    async def fake_contexts(owner, name, shas):
+    async def fake_contexts(owner, name, shas, own_reusable_job_prefixes=None):
         return list(contexts)
 
     if current is not None:
@@ -861,8 +864,16 @@ def _branch_protection_worker(
             calls.append(method)
         return response
 
+    async def fake_prefixes(owner, name, ref):
+        return set()
+
+    async def fake_rulesets(owner, name, default_branch):
+        return list(repo_rulesets), list(org_rulesets)
+
     monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", fake_shas)
     monkeypatch.setattr(repo_admin, "_check_run_contexts", fake_contexts)
+    monkeypatch.setattr(repo_admin, "_own_reusable_job_prefixes", fake_prefixes)
+    monkeypatch.setattr(repo_admin, "_matching_rulesets", fake_rulesets)
     monkeypatch.setattr(repo_admin, "api_raw", fake_api_raw)
     worker = repo_admin.make_branch_protection_worker(
         owner="hugoh", dry_run=dry_run, clear_stale_checks=clear_stale_checks
@@ -1081,6 +1092,316 @@ async def test_cmd_protection_sync_passes_verbose_to_run_parallel(monkeypatch):
     args = argparse.Namespace(repos=[], skip=None, dry_run=True, verbose=True)
     await repo_admin.cmd_protection_sync(args)
     assert seen["verbose"] is True
+
+
+# ---------------------------------------------------------------------------
+# protection sync -- reusable-workflow recognition (signal 2)
+# ---------------------------------------------------------------------------
+
+
+async def test_check_run_contexts_keeps_reusable_workflow_check_by_job_prefix(
+    monkeypatch,
+):
+    async def fake_api_json(method, path, **kwargs):
+        if path.endswith("/check-runs"):
+            return _check_runs_response([_run("hk / lint", "success", suite=999)])
+        if path.endswith("/actions/runs"):
+            return {
+                "workflow_runs": [
+                    {
+                        "check_suite_id": 999,
+                        "path": "hugoh/gh-workflows/.github/workflows/hk.yml@abc",
+                    }
+                ]
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(repo_admin, "api_json", fake_api_json)
+    contexts = await repo_admin._check_run_contexts("hugoh", "repo", ["sha"], {"hk"})
+    assert contexts == ["hk / lint"]
+
+
+async def test_check_run_contexts_drops_reusable_check_without_prefix(monkeypatch):
+    """The exact C2 symptom: a `hk / lint` check whose check-suite maps to an
+    external child workflow run is dropped when the job prefix isn't known.
+    """
+
+    async def fake_api_json(method, path, **kwargs):
+        if path.endswith("/check-runs"):
+            return _check_runs_response([_run("hk / lint", "success", suite=999)])
+        if path.endswith("/actions/runs"):
+            return {
+                "workflow_runs": [
+                    {
+                        "check_suite_id": 999,
+                        "path": "hugoh/gh-workflows/.github/workflows/hk.yml@abc",
+                    }
+                ]
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(repo_admin, "api_json", fake_api_json)
+    assert await repo_admin._check_run_contexts("hugoh", "repo", ["sha"]) == []
+
+
+def test_own_reusable_check_matches_first_segment_and_matrix_leg():
+    assert repo_admin._own_reusable_check("hk / lint", {"hk"}) is True
+    assert repo_admin._own_reusable_check("hk / lint (3.12)", {"hk"}) is True
+    assert repo_admin._own_reusable_check("a / b / c", {"a"}) is True
+    assert repo_admin._own_reusable_check("hk", {"hk"}) is False
+    assert repo_admin._own_reusable_check("Analyze (go)", {"hk"}) is False
+    assert repo_admin._own_reusable_check("CodeQL", {"hk"}) is False
+
+
+async def test_own_reusable_job_prefixes_reads_uses_jobs(monkeypatch):
+    hk_yml = base64.b64encode(
+        b"jobs:\n  hk:\n    uses: hugoh/gh-workflows/.github/workflows/hk.yml@x\n"
+    ).decode()
+    ci_yml = base64.b64encode(
+        b"jobs:\n  build:\n    name: Build\n    runs-on: ubuntu-latest\n    steps: []\n"
+    ).decode()
+
+    async def fake_api_raw(method, path, **kwargs):
+        assert path.endswith("/contents/.github/workflows")
+        return _FakeResponseWithJson(
+            200,
+            [
+                {"name": "hk.yml", "type": "file"},
+                {"name": "ci.yml", "type": "file"},
+                {"name": "README.md", "type": "file"},
+            ],
+        )
+
+    async def fake_api_json(method, path, **kwargs):
+        content = hk_yml if path.endswith("hk.yml") else ci_yml
+        return {"content": content}
+
+    monkeypatch.setattr(repo_admin, "api_raw", fake_api_raw)
+    monkeypatch.setattr(repo_admin, "api_json", fake_api_json)
+    prefixes = await repo_admin._own_reusable_job_prefixes("hugoh", "repo", "main")
+    assert prefixes == {"hk"}
+
+
+async def test_own_reusable_job_prefixes_empty_when_no_workflows_dir(monkeypatch):
+    async def fake_api_raw(method, path, **kwargs):
+        return _FakeResponse(404)
+
+    monkeypatch.setattr(repo_admin, "api_raw", fake_api_raw)
+    assert await repo_admin._own_reusable_job_prefixes("hugoh", "r", "main") == set()
+
+
+# ---------------------------------------------------------------------------
+# protection sync -- ChecksTarget / ruleset helpers
+# ---------------------------------------------------------------------------
+
+
+def _checks_rule(contexts, *, strict=True, integration=None):
+    return {
+        "type": "required_status_checks",
+        "parameters": {
+            "strict_required_status_checks_policy": strict,
+            "required_status_checks": [
+                {
+                    "context": c,
+                    **({"integration_id": integration} if integration else {}),
+                }
+                for c in contexts
+            ],
+        },
+    }
+
+
+def _ruleset(contexts=("hk / lint",), *, rid=1, enforcement="active", **over):
+    rs = {
+        "id": rid,
+        "name": "main-protection",
+        "target": "branch",
+        "enforcement": enforcement,
+        "source_type": "Repository",
+        "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+        "rules": [
+            {"type": "pull_request"},
+            _checks_rule(contexts),
+            {"type": "deletion"},
+        ],
+        "bypass_actors": [
+            {"actor_id": 5, "actor_type": "Integration", "bypass_mode": "pull_request"}
+        ],
+    }
+    rs.update(over)
+    return rs
+
+
+def test_checks_target_current_contexts_union():
+    classic = {"required_status_checks": {"contexts": ["a"], "strict": True}}
+    target = repo_admin.ChecksTarget(
+        classic=classic, repo_rulesets=[_ruleset(["b", "c"])]
+    )
+    assert target.mechanism == "both"
+    assert target.current_contexts() == ["a", "b", "c"]
+
+
+def test_checks_target_mechanism_ruleset_only():
+    target = repo_admin.ChecksTarget(classic=None, repo_rulesets=[_ruleset()])
+    assert target.mechanism == "ruleset"
+    assert target.current_contexts() == ["hk / lint"]
+
+
+def test_ruleset_ref_matches():
+    m = repo_admin._ruleset_ref_matches
+    assert m({"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}}, "main")
+    assert m({"ref_name": {"include": ["~ALL"]}}, "trunk")
+    assert m({"ref_name": {"include": ["refs/heads/main"]}}, "main")
+    assert not m({"ref_name": {"include": ["refs/heads/release/*"]}}, "main")
+    assert not m(
+        {"ref_name": {"include": ["~ALL"], "exclude": ["refs/heads/main"]}}, "main"
+    )
+
+
+def test_ruleset_checks_payload_round_trips_everything_else():
+    ruleset = _ruleset(["check"], integration=None)
+    payload = repo_admin.ruleset_checks_payload(ruleset, ["hk / lint"])
+    assert set(payload) == {
+        "name",
+        "target",
+        "enforcement",
+        "conditions",
+        "rules",
+        "bypass_actors",
+    }
+    assert payload["bypass_actors"] == ruleset["bypass_actors"]
+    assert payload["conditions"] == ruleset["conditions"]
+    rule_types = [r["type"] for r in payload["rules"]]
+    assert rule_types == ["pull_request", "required_status_checks", "deletion"]
+    checks_rule = payload["rules"][1]["parameters"]
+    assert checks_rule["required_status_checks"] == [
+        {"context": "hk / lint", "integration_id": repo_admin.GITHUB_ACTIONS_APP_ID}
+    ]
+    assert checks_rule["strict_required_status_checks_policy"] is True
+
+
+def test_ruleset_checks_payload_preserves_null_integration_when_set_unchanged():
+    ruleset = _ruleset(["hk / lint"], integration=None)
+    payload = repo_admin.ruleset_checks_payload(ruleset, ["hk / lint"])
+    assert payload["rules"][1]["parameters"]["required_status_checks"] == [
+        {"context": "hk / lint"}
+    ]
+
+
+def test_checks_target_up_to_date_ruleset():
+    target = repo_admin.ChecksTarget(
+        classic=None, repo_rulesets=[_ruleset(["hk / lint"])]
+    )
+    assert repo_admin.checks_target_up_to_date(target, ["hk / lint"]) is True
+    assert repo_admin.checks_target_up_to_date(target, ["check"]) is False
+
+
+# ---------------------------------------------------------------------------
+# protection sync -- ruleset worker
+# ---------------------------------------------------------------------------
+
+
+def _ruleset_worker(monkeypatch, *, dry_run, contexts, repo_rulesets, classic_code=404):
+    calls = []
+
+    async def fake_shas(owner, name):
+        return ["sha"]
+
+    async def fake_contexts(owner, name, shas, own_reusable_job_prefixes=None):
+        return list(contexts)
+
+    async def fake_prefixes(owner, name, ref):
+        return {"hk"}
+
+    async def fake_rulesets(owner, name, default_branch):
+        return list(repo_rulesets), []
+
+    async def fake_api_raw(method, path, **kwargs):
+        calls.append((method, path, kwargs.get("json")))
+        if path.endswith("/protection"):
+            return _FakeResponse(classic_code)
+        return _FakeResponse(200)
+
+    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", fake_shas)
+    monkeypatch.setattr(repo_admin, "_check_run_contexts", fake_contexts)
+    monkeypatch.setattr(repo_admin, "_own_reusable_job_prefixes", fake_prefixes)
+    monkeypatch.setattr(repo_admin, "_matching_rulesets", fake_rulesets)
+    monkeypatch.setattr(repo_admin, "api_raw", fake_api_raw)
+    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=dry_run)
+    return worker, calls
+
+
+async def test_ruleset_worker_dry_run_reports_would_update_without_put(monkeypatch):
+    worker, calls = _ruleset_worker(
+        monkeypatch,
+        dry_run=True,
+        contexts=["hk / lint"],
+        repo_rulesets=[_ruleset(["check"])],
+    )
+    result = await worker(REPO)
+    assert result.status == Status.OK
+    assert "would update ruleset -> require: hk / lint (was: check)" in result.line
+    assert not any(m == "PUT" for m, _p, _j in calls)
+
+
+async def test_ruleset_worker_apply_puts_full_round_tripped_body(monkeypatch):
+    ruleset = _ruleset(["check"])
+    worker, calls = _ruleset_worker(
+        monkeypatch, dry_run=False, contexts=["hk / lint"], repo_rulesets=[ruleset]
+    )
+    result = await worker(REPO)
+    assert result.tag == repo_admin.Tag.APPLIED_RULESET
+    put = [c for c in calls if c[0] == "PUT"]
+    assert len(put) == 1
+    _method, path, body = put[0]
+    assert path == "/repos/hugoh/repo/rulesets/1"
+    assert body["bypass_actors"] == ruleset["bypass_actors"]
+    assert body["rules"][1]["parameters"]["required_status_checks"] == [
+        {"context": "hk / lint", "integration_id": repo_admin.GITHUB_ACTIONS_APP_ID}
+    ]
+
+
+async def test_ruleset_worker_evaluate_mode_is_limited(monkeypatch):
+    worker, _calls = _ruleset_worker(
+        monkeypatch,
+        dry_run=False,
+        contexts=["hk / lint"],
+        repo_rulesets=[_ruleset(["check"], enforcement="evaluate")],
+    )
+    result = await worker(REPO)
+    assert result.status == Status.LIMITED
+    assert result.tag == repo_admin.Tag.RULESET_EVALUATE_MODE
+    assert "evaluate mode" in result.line
+
+
+async def test_ruleset_worker_multiple_rulesets_reports_and_skips(monkeypatch):
+    worker, calls = _ruleset_worker(
+        monkeypatch,
+        dry_run=False,
+        contexts=["hk / lint"],
+        repo_rulesets=[_ruleset(["check"], rid=1), _ruleset(["check"], rid=2)],
+    )
+    result = await worker(REPO)
+    assert result.status == Status.LIMITED_UNCHANGED
+    assert result.tag == repo_admin.Tag.MULTIPLE_RULESETS
+    assert "multiple rulesets enforce required checks: 1, 2" in result.line
+    assert not any(m == "PUT" for m, _p, _j in calls)
+
+
+async def test_both_mechanism_writes_classic_and_ruleset(monkeypatch):
+    worker, calls = _ruleset_worker(
+        monkeypatch,
+        dry_run=False,
+        contexts=["hk / lint"],
+        repo_rulesets=[_ruleset(["hk / lint"])],
+        classic_code=200,
+    )
+    # classic GET returns 200 with empty body -> not up to date -> both PUTs
+    result = await worker(REPO)
+    assert result.tag == repo_admin.Tag.APPLIED_BOTH
+    puts = [p for m, p, _j in calls if m == "PUT"]
+    assert any(p.endswith("/protection") for p in puts)
+    assert any(p == "/repos/hugoh/repo/rulesets/1" for p in puts)
 
 
 # ---------------------------------------------------------------------------
