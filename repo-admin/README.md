@@ -60,7 +60,11 @@ uv run repo_admin.py <resource> <verb> [repo ...] \
   gates. A `hk / lint`-style check produced by a job that calls a reusable
   workflow via `uses:` is recognised as the repo's own (matched by job
   name against the workflow files), so a C2-migrated repo no longer keeps a
-  stale `check` context. The required-checks gate is read and written
+  stale `check` context. GitHub sometimes reports that check bare (`lint`)
+  on one run and prefixed (`hk / lint`) on another; when a sampled context
+  is only the prefix-stripped/-added form of one already required, the
+  existing spelling is kept rather than switching the gate to a name
+  `main`'s runs never report. The required-checks gate is read and written
   wherever it lives — classic branch protection, a repository ruleset's
   `required_status_checks` rule, or both; a ruleset is updated via a
   whole-object round-trip PUT that preserves `bypass_actors`, `conditions`,

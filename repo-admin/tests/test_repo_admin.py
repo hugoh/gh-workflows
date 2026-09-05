@@ -1020,6 +1020,41 @@ async def test_branch_protection_worker_clears_stale_checks_when_opted_in(monkey
     assert "would update -> require: (none yet) (was: check, lychee)" in result.line
 
 
+def test_reconcile_reusable_prefix_keeps_existing_spelling():
+    assert repo_admin._reconcile_reusable_prefix(["lint"], ["hk / lint"]) == [
+        "hk / lint"
+    ]
+    assert repo_admin._reconcile_reusable_prefix(["hk / lint"], ["lint"]) == ["lint"]
+
+
+def test_reconcile_reusable_prefix_does_not_touch_unrelated_contexts():
+    assert repo_admin._reconcile_reusable_prefix(["hk / lint", "e2e"], ["check"]) == [
+        "e2e",
+        "hk / lint",
+    ]
+    assert repo_admin._reconcile_reusable_prefix([], ["hk / lint"]) == []
+
+
+async def test_branch_protection_worker_keeps_existing_check_name_on_prefix_flip(
+    monkeypatch,
+):
+    # main reports `hk / lint` (a reusable-workflow check); the latest PR's run
+    # happened to report bare `lint` -- a GitHub cross-run naming inconsistency.
+    # The gate must stay on `hk / lint` or it strands pending forever.
+    worker, calls = _branch_protection_worker(
+        monkeypatch,
+        dry_run=True,
+        shas=["eba79c"],
+        contexts=["lint"],
+        current=_protection_state(contexts=["hk / lint"]),
+        track_calls=True,
+    )
+    result = await worker(REPO)
+    assert result.status == Status.LIMITED_UNCHANGED
+    assert "PUT" not in calls
+    assert "kept hk / lint over sampled lint" in result.line
+
+
 async def test_branch_protection_worker_apply_unchanged_when_already_protected(
     monkeypatch,
 ):
