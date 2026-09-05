@@ -5,7 +5,7 @@ permissions:
 
 on: # yamllint disable-line rule:truthy
   schedule:
-    - cron: "0 10 * * 6" # 5am Central (fixed UTC-5 offset; drifts to 4am during CST)
+    - cron: "17 10 * * 6" # ~5am Central (fixed UTC-5 offset; drifts to 4am during CST); :17 avoids top-of-hour scheduling congestion on GitHub Actions
   workflow_dispatch: {}
 
 jobs:
