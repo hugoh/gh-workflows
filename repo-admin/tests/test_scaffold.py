@@ -24,7 +24,7 @@ def _args(path: Path, **overrides: object) -> argparse.Namespace:
         "pages_dir": "site",
         "pages_build_cmd": "mise run pages-build",
         "watch_workflows": "[ci, hk]",
-        "force": False,
+        "force": None,
         "no_pin": True,
         "dry_run": False,
     }
@@ -116,8 +116,22 @@ async def test_idempotent_keeps_existing_files(tmp_path: Path) -> None:
     await _run(target)
     assert (target / "hk.pkl").read_text() == "# hand-edited\n"
 
-    await _run(target, force=True)
+    await _run(target, force=[])
     assert (target / "hk.pkl").read_text() != "# hand-edited\n"
+
+
+async def test_targeted_force_overwrites_only_named_paths(tmp_path: Path) -> None:
+    target = tmp_path / "widget"
+    await _run(target, release=True)
+    (target / "hk.pkl").write_text("# keep me\n")
+    (target / ".github/workflows/hk.yml").write_text("# stale caller\n")
+
+    await _run(target, release=True, force=[".github/workflows/hk.yml"])
+    assert (target / "hk.pkl").read_text() == "# keep me\n"
+    assert "stale caller" not in (target / ".github/workflows/hk.yml").read_text()
+    assert (
+        "uses: hugoh/gh-workflows" in (target / ".github/workflows/hk.yml").read_text()
+    )
 
 
 async def test_existing_git_repo_is_not_reinitialised(tmp_path: Path) -> None:
