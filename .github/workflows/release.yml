@@ -4,6 +4,30 @@ on: # yamllint disable-line rule:truthy
   push:
     branches:
       - main
+  workflow_call:
+    inputs:
+      tag:
+        description: Existing tag to create a GitHub Release for (skips the bump; requires notes)
+        type: string
+        required: false
+      notes:
+        description: Release notes body (required when tag is set)
+        type: string
+        required: false
+      major-tag:
+        description: Also force-move the vN major tag to the new release (for Marketplace actions)
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to create a GitHub Release for (skips the bump; requires notes)
+        required: false
+        type: string
+      notes:
+        description: Release notes body (required when tag is set)
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -16,6 +40,8 @@ jobs:
   release:
     timeout-minutes: 5
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -24,19 +50,35 @@ jobs:
 
       - name: Bump version and push tag
         id: tag_version
+        if: inputs.tag == ''
         uses: mathieudutour/github-tag-action@a22cf08638b34d5badda920f9daf6e72c477b07b # v6.2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           default_bump: false
 
       - name: Create a GitHub release
-        if: steps.tag_version.outputs.new_tag != ''
+        if: inputs.tag != '' || steps.tag_version.outputs.new_tag != ''
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NEW_TAG: ${{ steps.tag_version.outputs.new_tag }}
-          CHANGELOG: ${{ steps.tag_version.outputs.changelog }}
+          NEW_TAG: ${{ inputs.tag != '' && inputs.tag || steps.tag_version.outputs.new_tag }}
+          CHANGELOG: ${{ inputs.notes != '' && inputs.notes || steps.tag_version.outputs.changelog }}
         run: |
           gh release create "$NEW_TAG" \
             --verify-tag \
             --title "Release $NEW_TAG" \
             --notes "$CHANGELOG"
+
+      - name: Move the major-version tag
+        if: >-
+          inputs.major-tag &&
+          (inputs.tag != '' || steps.tag_version.outputs.new_tag != '')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_TAG: ${{ inputs.tag != '' && inputs.tag || steps.tag_version.outputs.new_tag }}
+        run: |
+          major="${NEW_TAG%%.*}"
+          sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${NEW_TAG}" --jq '.object.sha')
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/${major}" \
+            -f "sha=${sha}" -F force=true \
+          || gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f "ref=refs/tags/${major}" -f "sha=${sha}"

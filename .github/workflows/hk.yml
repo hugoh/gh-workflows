@@ -1,17 +1,30 @@
 name: hk
 
-permissions: {}
-
 on: # yamllint disable-line rule:truthy
   push:
     branches:
       - main
-      - renovate/**
   pull_request:
+  workflow_call:
+    inputs:
+      fetch-depth:
+        description: Commits to fetch (0 = full history, for cog/conventional-commit checks)
+        type: string
+        default: "1"
+      pre-hk:
+        description: Shell command to run after mise setup, before `hk check` (e.g. a build)
+        type: string
+        default: ""
+      apt-packages:
+        description: Space-separated apt packages the lint job needs (cached)
+        type: string
+        default: ""
+
+permissions: {}
 
 jobs:
   lint:
-    timeout-minutes: 5
+    timeout-minutes: 10
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number ||
         github.ref }}
@@ -22,11 +35,26 @@ jobs:
       statuses: write
     runs-on: ubuntu-latest
     steps:
+      - name: Install apt packages
+        if: inputs.apt-packages != ''
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
+        with:
+          packages: ${{ inputs.apt-packages }}
+          version: ${{ inputs.apt-packages }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: ${{ inputs.fetch-depth || '1' }}
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        env:
+          MISE_HTTP_TIMEOUT: 120s
+          MISE_FETCH_REMOTE_VERSIONS_TIMEOUT: 60s
+      - name: Pre-check
+        if: inputs.pre-hk != ''
+        env:
+          PRE_HK: ${{ inputs.pre-hk }}
+        run: bash -c "$PRE_HK"
       - name: hk checks
         env:
           PINACT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: hk check --no-progress --profile ci --all
+        run: hk check --no-progress --profile ci --all --no-fail-fast
