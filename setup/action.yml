@@ -13,3 +13,8 @@ runs:
         persist-credentials: false
         fetch-depth: ${{ inputs.fetch-depth }}
     - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      env:
+        # Widen mise's network timeouts so a slow mirror or cold cache
+        # retries instead of aborting the job.
+        MISE_HTTP_TIMEOUT: 120s
+        MISE_FETCH_REMOTE_VERSIONS_TIMEOUT: 60s
