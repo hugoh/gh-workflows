@@ -16,7 +16,9 @@ Run from `gh-workflows/`:
 - **`merge sync`** — auto-merge, delete-branch-on-merge, PR-branch auto-update.
 - **`protection sync`** — require status checks + a PR (0 approvals, no direct
   pushes) before merging. Required contexts are sampled from the latest PR's
-  own-workflow check runs.
+  own-workflow check runs. Public repos use classic branch protection; private
+  repos (no classic protection on this plan) get an equivalent branch ruleset
+  with an owner bypass, so you can still push straight to their default branch.
 - **`security sync`** — Dependabot alerts + (public repos) secret scanning,
   Dependabot security updates, private vulnerability reporting, CodeQL default
   setup.

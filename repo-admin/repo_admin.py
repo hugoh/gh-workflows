@@ -99,6 +99,7 @@ class Tag(enum.StrEnum):
     RULESET_EVALUATE_MODE = "ruleset_evaluate_mode"
     MULTIPLE_RULESETS = "multiple_rulesets"
     ORG_RULESET = "org_ruleset"
+    RULESET_NO_CHECKS_RULE = "ruleset_no_checks_rule"
     SKIPPED_NO_PLAN = "skipped_no_plan"
     UNAVAILABLE = "unavailable"
 
@@ -774,6 +775,16 @@ def _reconcile_reusable_prefix(sampled: list[str], existing: list[str]) -> list[
 # github-actions app can satisfy this gate" filter.
 GITHUB_ACTIONS_APP_ID = 15368
 
+# Name of the branch ruleset this tool creates for a plan-gated private repo
+# (see _create_protection_ruleset). Stable so a later run recognises its own
+# ruleset via _matching_rulesets rather than creating a second one.
+MANAGED_RULESET_NAME = "repo-admin: branch protection"
+
+# GitHub's built-in "Repository admin" base role id, used as a bypass actor on
+# the managed ruleset so the account owner keeps direct-push access to the
+# default branch while every pull request still goes through the checks gate.
+REPO_ADMIN_ROLE_ID = 5
+
 _RULESET_ROUND_TRIP_FIELDS = (
     "name",
     "target",
@@ -856,6 +867,55 @@ def ruleset_checks_payload(ruleset: dict, contexts: list[str]) -> dict:
     params["required_status_checks"] = new_entries
     params["strict_required_status_checks_policy"] = True
     return {key: updated[key] for key in _RULESET_ROUND_TRIP_FIELDS if key in updated}
+
+
+def new_ruleset_payload(default_branch: str, contexts: list[str]) -> dict:
+    """The POST body for a fresh branch ruleset mirroring the classic baseline:
+    PR required (0 approvals), required status checks pinned to the Actions app,
+    no force-push, no deletion. The account owner bypasses so direct pushes to
+    the default branch still work -- the deliberate difference from the classic
+    protection on public repos, which has no bypass.
+    """
+    rules: list[dict] = [
+        {
+            "type": "pull_request",
+            "parameters": {
+                "required_approving_review_count": 0,
+                "dismiss_stale_reviews_on_push": False,
+                "require_code_owner_review": False,
+                "require_last_push_approval": False,
+                "required_review_thread_resolution": False,
+            },
+        }
+    ]
+    if contexts:
+        rules.append(
+            {
+                "type": "required_status_checks",
+                "parameters": {
+                    "strict_required_status_checks_policy": True,
+                    "required_status_checks": [
+                        {"context": c, "integration_id": GITHUB_ACTIONS_APP_ID}
+                        for c in sorted(contexts)
+                    ],
+                },
+            }
+        )
+    rules += [{"type": "non_fast_forward"}, {"type": "deletion"}]
+    return {
+        "name": MANAGED_RULESET_NAME,
+        "target": "branch",
+        "enforcement": "active",
+        "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+        "rules": rules,
+        "bypass_actors": [
+            {
+                "actor_type": "RepositoryRole",
+                "actor_id": REPO_ADMIN_ROLE_ID,
+                "bypass_mode": "always",
+            }
+        ],
+    }
 
 
 @dataclass
@@ -965,6 +1025,57 @@ def _plan_gated_result(repo: Repo, *, tag: Tag | None = None) -> RepoResult:
     return RepoResult(repo, result_line(repo.name, detail, status), status, tag=tag)
 
 
+async def _create_protection_ruleset(
+    owner: str, repo: Repo, contexts: list[str], dry_run: bool
+) -> RepoResult:
+    """A plan-gated private repo can't use classic branch protection, but
+    repository rulesets are available on every plan. Create one enforcing the
+    same gate. A later `protection sync` run finds this ruleset via
+    `_matching_rulesets` (it carries a `required_status_checks` rule) and takes
+    the normal ruleset path, so this only ever creates -- never updates.
+    """
+    listing = await api_raw(
+        "GET", f"/repos/{owner}/{repo.name}/rulesets", params={"targets": "branch"}
+    )
+    summaries = listing.json() if listing.is_success else None
+    if isinstance(summaries, list) and any(
+        s.get("enforcement") in ("active", "evaluate") for s in summaries
+    ):
+        detail = (
+            "plan-gated; a branch ruleset without a required-checks rule already "
+            "exists -- add the gate to it manually"
+        )
+        return RepoResult(
+            repo,
+            result_line(repo.name, detail, Status.LIMITED_UNCHANGED),
+            Status.LIMITED_UNCHANGED,
+            tag=None if dry_run else Tag.RULESET_NO_CHECKS_RULE,
+        )
+
+    require_desc = ", ".join(sorted(contexts))
+    if dry_run:
+        detail = f"would create ruleset -> require: {require_desc}"
+        return RepoResult(repo, result_line(repo.name, detail, Status.OK), Status.OK)
+
+    response = await api_raw(
+        "POST",
+        f"/repos/{owner}/{repo.name}/rulesets",
+        json=new_ruleset_payload(repo.default_branch, contexts),
+    )
+    if response.status_code in (403, 404):
+        return _plan_gated_result(repo, tag=Tag.SKIPPED_NO_PLAN)
+    if not response.is_success:
+        raise GhError(error_message(response), status_code=response.status_code)
+
+    detail = f"created ruleset -> require: {require_desc}"
+    return RepoResult(
+        repo,
+        result_line(repo.name, detail, Status.OK),
+        Status.OK,
+        tag=Tag.APPLIED_RULESET,
+    )
+
+
 def make_branch_protection_worker(
     owner: str, dry_run: bool, clear_stale_checks: bool = False
 ):
@@ -1018,7 +1129,11 @@ def make_branch_protection_worker(
 
         # A plan that gates classic protection only matters when no ruleset
         # already enforces the checks gate; with one, that's the write target.
+        # With checks to require but no mechanism, fall back to a ruleset --
+        # available on every plan, unlike classic protection on private repos.
         if plan_gated and mechanism != "ruleset":
+            if contexts:
+                return await _create_protection_ruleset(owner, repo, contexts, dry_run)
             return _plan_gated_result(
                 repo, tag=Tag.SKIPPED_NO_PLAN if not dry_run else None
             )
@@ -1232,7 +1347,13 @@ async def cmd_protection_sync(args: argparse.Namespace) -> int:
     needs_attention = sorted(
         r.repo.name
         for r in results
-        if r.tag in (Tag.MULTIPLE_RULESETS, Tag.ORG_RULESET, Tag.RULESET_EVALUATE_MODE)
+        if r.tag
+        in (
+            Tag.MULTIPLE_RULESETS,
+            Tag.ORG_RULESET,
+            Tag.RULESET_EVALUATE_MODE,
+            Tag.RULESET_NO_CHECKS_RULE,
+        )
     )
     print()
     print("Summary:")

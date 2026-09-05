@@ -923,7 +923,7 @@ async def test_branch_protection_worker_dry_run_limited_unchanged_when_plan_gate
     monkeypatch,
 ):
     worker = _branch_protection_worker(
-        monkeypatch, dry_run=True, shas=["sha"], contexts=["build"], status_code=403
+        monkeypatch, dry_run=True, shas=["sha"], contexts=[], status_code=403
     )
     result = await worker(REPO)
     assert result.status == Status.LIMITED_UNCHANGED
@@ -936,7 +936,7 @@ async def test_branch_protection_worker_apply_limited_unchanged_when_plan_gated(
     monkeypatch,
 ):
     worker = _branch_protection_worker(
-        monkeypatch, dry_run=False, shas=["sha"], contexts=["build"], status_code=403
+        monkeypatch, dry_run=False, shas=["sha"], contexts=[], status_code=403
     )
     result = await worker(REPO)
     assert result.status == Status.LIMITED_UNCHANGED
@@ -1437,6 +1437,149 @@ async def test_both_mechanism_writes_classic_and_ruleset(monkeypatch):
     puts = [p for m, p, _j in calls if m == "PUT"]
     assert any(p.endswith("/protection") for p in puts)
     assert any(p == "/repos/hugoh/repo/rulesets/1" for p in puts)
+
+
+# ---------------------------------------------------------------------------
+# protection sync -- ruleset fallback for plan-gated private repos
+# ---------------------------------------------------------------------------
+
+
+def test_new_ruleset_payload_shape():
+    payload = repo_admin.new_ruleset_payload("main", ["hk / lint", "build"])
+    assert payload["name"] == repo_admin.MANAGED_RULESET_NAME
+    assert payload["target"] == "branch"
+    assert payload["enforcement"] == "active"
+    assert payload["conditions"]["ref_name"]["include"] == ["~DEFAULT_BRANCH"]
+    assert [r["type"] for r in payload["rules"]] == [
+        "pull_request",
+        "required_status_checks",
+        "non_fast_forward",
+        "deletion",
+    ]
+    assert payload["rules"][0]["parameters"]["required_approving_review_count"] == 0
+    checks = payload["rules"][1]["parameters"]
+    assert checks["strict_required_status_checks_policy"] is True
+    assert checks["required_status_checks"] == [
+        {"context": "build", "integration_id": repo_admin.GITHUB_ACTIONS_APP_ID},
+        {"context": "hk / lint", "integration_id": repo_admin.GITHUB_ACTIONS_APP_ID},
+    ]
+    assert payload["bypass_actors"] == [
+        {
+            "actor_type": "RepositoryRole",
+            "actor_id": repo_admin.REPO_ADMIN_ROLE_ID,
+            "bypass_mode": "always",
+        }
+    ]
+
+
+def test_new_ruleset_payload_no_contexts_omits_checks_rule():
+    payload = repo_admin.new_ruleset_payload("main", [])
+    assert [r["type"] for r in payload["rules"]] == [
+        "pull_request",
+        "non_fast_forward",
+        "deletion",
+    ]
+
+
+def _plan_gated_ruleset_worker(
+    monkeypatch, *, dry_run, contexts=("hk / lint",), ruleset_listing=(), matching=()
+):
+    calls = []
+
+    async def fake_shas(owner, name):
+        return ["sha"]
+
+    async def fake_contexts(owner, name, shas, own_reusable_job_prefixes=None):
+        return list(contexts)
+
+    async def fake_prefixes(owner, name, ref):
+        return {"hk"}
+
+    async def fake_rulesets(owner, name, default_branch):
+        return list(matching), []
+
+    async def fake_api_raw(method, path, **kwargs):
+        calls.append((method, path, kwargs.get("json")))
+        if path.endswith("/protection"):
+            return _FakeResponse(403)
+        if method == "GET" and path.endswith("/rulesets"):
+            return _FakeResponseWithJson(200, list(ruleset_listing))
+        return _FakeResponse(200)
+
+    monkeypatch.setattr(repo_admin, "_recent_pr_head_shas", fake_shas)
+    monkeypatch.setattr(repo_admin, "_check_run_contexts", fake_contexts)
+    monkeypatch.setattr(repo_admin, "_own_reusable_job_prefixes", fake_prefixes)
+    monkeypatch.setattr(repo_admin, "_matching_rulesets", fake_rulesets)
+    monkeypatch.setattr(repo_admin, "api_raw", fake_api_raw)
+    worker = repo_admin.make_branch_protection_worker(owner="hugoh", dry_run=dry_run)
+    return worker, calls
+
+
+async def test_plan_gated_worker_creates_ruleset_when_contexts_sampled(monkeypatch):
+    worker, calls = _plan_gated_ruleset_worker(
+        monkeypatch, dry_run=False, contexts=["hk / lint"]
+    )
+    result = await worker(REPO)
+    assert result.status == Status.OK
+    assert result.tag == repo_admin.Tag.APPLIED_RULESET
+    posts = [c for c in calls if c[0] == "POST"]
+    assert len(posts) == 1
+    _method, path, body = posts[0]
+    assert path == "/repos/hugoh/repo/rulesets"
+    assert [r["type"] for r in body["rules"]] == [
+        "pull_request",
+        "required_status_checks",
+        "non_fast_forward",
+        "deletion",
+    ]
+    assert body["bypass_actors"][0]["actor_type"] == "RepositoryRole"
+    assert "created ruleset -> require: hk / lint" in result.line
+
+
+async def test_plan_gated_worker_dry_run_reports_would_create_no_post(monkeypatch):
+    worker, calls = _plan_gated_ruleset_worker(
+        monkeypatch, dry_run=True, contexts=["hk / lint"]
+    )
+    result = await worker(REPO)
+    assert result.status == Status.OK
+    assert "would create ruleset -> require: hk / lint" in result.line
+    assert not any(m == "POST" for m, _p, _j in calls)
+
+
+async def test_plan_gated_worker_still_skips_when_no_contexts(monkeypatch):
+    worker, calls = _plan_gated_ruleset_worker(monkeypatch, dry_run=False, contexts=[])
+    result = await worker(REPO)
+    assert result.status == Status.LIMITED_UNCHANGED
+    assert result.tag == repo_admin.Tag.SKIPPED_NO_PLAN
+    assert "plan does not allow branch protection" in result.line
+    assert not any(m == "POST" for m, _p, _j in calls)
+
+
+async def test_plan_gated_worker_idempotent_once_ruleset_exists(monkeypatch):
+    worker, calls = _plan_gated_ruleset_worker(
+        monkeypatch,
+        dry_run=False,
+        contexts=["hk / lint"],
+        matching=[_ruleset(["hk / lint"])],
+    )
+    result = await worker(REPO)
+    assert result.status == Status.UNCHANGED
+    assert not any(m in ("POST", "PUT") for m, _p, _j in calls)
+
+
+async def test_plan_gated_worker_manual_attention_when_plain_branch_ruleset_exists(
+    monkeypatch,
+):
+    worker, calls = _plan_gated_ruleset_worker(
+        monkeypatch,
+        dry_run=False,
+        contexts=["hk / lint"],
+        ruleset_listing=[{"id": 9, "enforcement": "active"}],
+    )
+    result = await worker(REPO)
+    assert result.status == Status.LIMITED_UNCHANGED
+    assert result.tag == repo_admin.Tag.RULESET_NO_CHECKS_RULE
+    assert not any(m == "POST" for m, _p, _j in calls)
 
 
 # ---------------------------------------------------------------------------
