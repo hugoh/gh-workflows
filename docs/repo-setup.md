@@ -25,13 +25,13 @@ Run from `gh-workflows/`:
 
 | File | Purpose | Notes |
 |---|---|---|
-| `.github/workflows/hk.yml` | lint / conventional-commit check | `setup` + `hk-check` composite actions (becomes a thin `workflow_call` caller once that reusable lands) |
-| `.github/workflows/release.yml` | tag + GitHub release | `mathieudutour/github-tag-action` + `gh release create`; **omit** if the repo isn't released |
+| `.github/workflows/hk.yml` | lint / conventional-commit check | thin caller of `hugoh/gh-workflows/.github/workflows/hk.yml` (inputs: `pre-hk`, `apt-packages`, `fetch-depth`) |
+| `.github/workflows/release.yml` | tag + GitHub release | thin caller of `hugoh/gh-workflows/.github/workflows/release.yml` (`mathieudutour` + `gh release create`); **omit** if the repo isn't released |
 | `.github/workflows/rerun-transient-failures.yml` | retry transient CI failures | optional; `workflow_run` trigger → [`hugoh/rerun-transient-failures`](https://github.com/hugoh/rerun-transient-failures) |
 | `.renovaterc.json` | dependency updates | `{"extends": ["github>hugoh/renovate-config"]}` — nothing else unless the repo needs an override |
 | `hk.pkl` | lint ruleset | `amends "package://github.com/hugoh/hk-config/..."` |
 | `mise.toml` | toolchain | repo-specific tools; `hk` line is Renovate-managed via hk-config's preset |
-| `cog.toml` | release config | **only if overriding** — monorepo `[packages]`, a custom changelog template, or `pre_bump_hooks`. The reusable `release.yml` supplies the canonical config otherwise. |
+| `cocogitto` | release tooling | not needed today — the reusable `release.yml` uses `mathieudutour/github-tag-action`. A future migration to `cog` is tracked separately. |
 
 ### How Renovate keeps a scaffolded repo current
 

@@ -1,40 +1,27 @@
 ---
 name: hk
 
-permissions: {}
-
 on: # yamllint disable-line rule:truthy
   push:
     branches:
       - << default_branch >>
   pull_request:
 
+permissions: {}
+
 jobs:
-  lint:
-    timeout-minutes: 10
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number ||
-        github.ref }}
-      cancel-in-progress: true
+  hk:
+    uses: hugoh/gh-workflows/.github/workflows/hk.yml@<< gh_workflows_ref >>
     permissions:
       contents: read
       packages: read
-      # To report GitHub Actions status checks
       statuses: write
-    runs-on: ubuntu-latest
-    steps:
-<% if apt_packages %>
-      - name: Install system packages
-        uses: awalsh128/cache-apt-pkgs-action@v1
-        with:
-          packages: << apt_packages >>
-          version: << apt_packages | replace(" ", "-") >>
-<% endif %>
-      - uses: hugoh/gh-workflows/setup@<< gh_workflows_ref >>
+<% if pre_hk or apt_packages %>
+    with:
 <% if pre_hk %>
-      - name: Pre-check
-        run: << pre_hk >>
+      pre-hk: << pre_hk >>
 <% endif %>
-      - uses: hugoh/gh-workflows/hk-check@<< gh_workflows_ref >>
-        env:
-          PINACT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+<% if apt_packages %>
+      apt-packages: << apt_packages >>
+<% endif %>
+<% endif %>
