@@ -1,7 +1,10 @@
 ---
 name: rerun-transient-failures
 
-on:
+# workflow_run is safe here: top-level permissions are {}, the one job gets
+# only actions:write, nothing checks out the triggering ref, no secrets — it
+# just calls `gh run rerun` on the run's own id.
+on: # zizmor: ignore[dangerous-triggers]
   workflow_run:
     workflows: << watch_workflows >>
     types: [completed]
@@ -16,6 +19,6 @@ jobs:
     permissions:
       actions: write
     steps:
-      - uses: hugoh/rerun-transient-failures@v1
+      - uses: hugoh/rerun-transient-failures@<< rerun_transient_ref >>
         with:
           run-id: ${{ github.event.workflow_run.id }}

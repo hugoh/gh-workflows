@@ -20,6 +20,7 @@ def _args(path: Path, **overrides: object) -> argparse.Namespace:
         "pre_hk": None,
         "default_branch": "main",
         "gh_workflows_ref": "deadbeef1234 # v1.99.0",
+        "rerun_transient_ref": "cafef00d # v0.9.9",
         "pages_dir": "site",
         "pages_build_cmd": "mise run pages-build",
         "watch_workflows": "[ci, hk]",

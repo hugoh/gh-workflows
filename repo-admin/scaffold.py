@@ -12,8 +12,9 @@ Usage:
   repo_admin.py repo scaffold PATH [--name N] [--release] [--pages] [--action]
       [--rerun-transient] [--tests {none,python}] [--shell]
       [--apt-packages "pkg ..."] [--pre-hk CMD] [--default-branch B]
-      [--gh-workflows-ref REF] [--pages-dir DIR] [--pages-build-cmd CMD]
-      [--watch-workflows "[CI, hk]"] [--force] [--no-pin] [--dry-run]
+      [--gh-workflows-ref REF] [--rerun-transient-ref REF] [--pages-dir DIR]
+      [--pages-build-cmd CMD] [--watch-workflows "[CI, hk]"]
+      [--force] [--no-pin] [--dry-run]
 """
 
 from __future__ import annotations
@@ -129,7 +130,8 @@ def _dest_relpath(overlay: str, template_path: Path) -> Path:
     return Path(*parts)
 
 
-def _resolve_gh_workflows_ref(explicit: str | None) -> str:
+def _resolve_ref(repo: str, explicit: str | None) -> str:
+    """`<sha> # <tag>` for the repo's latest release, or `main` as a fallback."""
     if explicit:
         return explicit
     try:
@@ -139,7 +141,7 @@ def _resolve_gh_workflows_ref(explicit: str | None) -> str:
                 "release",
                 "view",
                 "-R",
-                "hugoh/gh-workflows",
+                repo,
                 "--json",
                 "tagName",
                 "--jq",
@@ -150,13 +152,7 @@ def _resolve_gh_workflows_ref(explicit: str | None) -> str:
             check=True,
         ).stdout.strip()
         sha = subprocess.run(
-            [
-                "gh",
-                "api",
-                f"repos/hugoh/gh-workflows/git/ref/tags/{tag}",
-                "--jq",
-                ".object.sha",
-            ],
+            ["gh", "api", f"repos/{repo}/git/ref/tags/{tag}", "--jq", ".object.sha"],
             capture_output=True,
             text=True,
             check=True,
@@ -166,8 +162,7 @@ def _resolve_gh_workflows_ref(explicit: str | None) -> str:
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
     print(
-        "  ! could not resolve latest hugoh/gh-workflows tag — using @main; "
-        "pin it before merging"
+        f"  ! could not resolve {repo}'s latest release — using @main; pin before merging"
     )
     return "main"
 
@@ -185,7 +180,12 @@ def _context(args: argparse.Namespace, name: str) -> dict[str, object]:
     return {
         "repo_name": name,
         "default_branch": args.default_branch,
-        "gh_workflows_ref": _resolve_gh_workflows_ref(args.gh_workflows_ref),
+        "gh_workflows_ref": _resolve_ref("hugoh/gh-workflows", args.gh_workflows_ref),
+        "rerun_transient_ref": (
+            _resolve_ref("hugoh/rerun-transient-failures", args.rerun_transient_ref)
+            if args.rerun_transient
+            else ""
+        ),
         "hk_groups": hk_groups,
         "tests": args.tests,
         "action": bool(args.action),
@@ -342,6 +342,10 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--gh-workflows-ref",
         help="pin for hugoh/gh-workflows (default: latest release)",
+    )
+    p.add_argument(
+        "--rerun-transient-ref",
+        help="pin for hugoh/rerun-transient-failures (default: latest release)",
     )
     p.add_argument("--pages-dir", default="site", help="dir to publish (with --pages)")
     p.add_argument(
