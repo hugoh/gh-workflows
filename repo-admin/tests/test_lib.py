@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import subprocess
 
 import httpx
@@ -327,3 +328,108 @@ def test_edit_secrets_file_raises_gh_error_when_sops_not_on_path(enc_file, monke
     monkeypatch.setattr(subprocess, "run", fake_run)
     with pytest.raises(GhError, match="sops not found"):
         lib.edit_secrets_file()
+
+
+def test_default_variables_reads_repo_list(tmp_path, monkeypatch):
+    variables_file = tmp_path / "variables.yaml"
+    variables_file.write_text("SMTP_HOST:\n  repos: [gh-digest]\n")
+    monkeypatch.setattr(lib, "VARIABLES_FILE", variables_file)
+    assert lib.default_variables() == {"SMTP_HOST": ["gh-digest"]}
+
+
+def test_decrypt_variables_reads_from_the_variables_enc_file(tmp_path, monkeypatch):
+    enc = tmp_path / "variables.enc.yaml"
+    enc.write_text("placeholder")
+    monkeypatch.setattr(lib, "VARIABLES_ENC_FILE", enc)
+
+    def fake_run(cmd, **kwargs):
+        assert cmd == ["sops", "-d", str(enc)]
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout="SMTP_PORT: '587'\n", stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert lib.decrypt_variables() == {"SMTP_PORT": "587"}
+
+
+def test_edit_variables_file_runs_sops_on_the_variables_enc_file(tmp_path, monkeypatch):
+    enc = tmp_path / "variables.enc.yaml"
+    monkeypatch.setattr(lib, "VARIABLES_ENC_FILE", enc)
+
+    def fake_run(cmd, **kwargs):
+        assert cmd == ["sops", str(enc)]
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert lib.edit_variables_file() == 0
+
+
+def test_write_enc_file_encrypts_a_mapping_via_sops_stdin(tmp_path, monkeypatch):
+    enc = tmp_path / "variables.enc.yaml"
+    config_file = tmp_path / ".sops.yaml"
+    monkeypatch.setattr(lib, "SOPS_CONFIG_FILE", config_file)
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[:2] == ["sops", "--encrypt"]
+        assert "--filename-override" in cmd
+        assert kwargs["input"] == "A: '1'\nB: two\n"
+        return subprocess.CompletedProcess(cmd, 0, stdout="ENC\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    lib.write_enc_file(enc, {"A": "1", "B": "two"})
+    assert enc.read_text() == "ENC\n"
+
+
+def test_workflow_config_names_splits_secrets_and_vars_and_drops_github_token():
+    text = (
+        "run: echo ${{ secrets.PR_DIGEST_PAT }} ${{ secrets.GITHUB_TOKEN }}\n"
+        "with:\n  host: ${{ vars.SMTP_HOST }}\n  host2: ${{  vars.SMTP_HOST  }}\n"
+    )
+    secrets, variables = lib.workflow_config_names([text])
+    assert secrets == {"PR_DIGEST_PAT"}
+    assert variables == {"SMTP_HOST"}
+
+
+async def test_fetch_workflow_texts_downloads_each_yaml_file(
+    httpx2_mock: respx.Router, monkeypatch
+):
+    monkeypatch.setattr("asyncgh.client._auth_token", lambda: "fake-token")
+    monkeypatch.setenv("GH_OWNER", "hugoh")
+    httpx2_mock.get(
+        f"{API_BASE}/repos/hugoh/gh-digest/contents/.github/workflows"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "type": "file",
+                    "name": "digest.yml",
+                    "path": ".github/workflows/digest.yml",
+                },
+                {
+                    "type": "file",
+                    "name": "notes.md",
+                    "path": ".github/workflows/notes.md",
+                },
+            ],
+        )
+    )
+    httpx2_mock.get(
+        f"{API_BASE}/repos/hugoh/gh-digest/contents/.github/workflows/digest.yml"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={"content": base64.b64encode(b"on: push\n").decode()},
+        )
+    )
+    assert await lib.fetch_workflow_texts("hugoh", "gh-digest") == ["on: push\n"]
+
+
+async def test_fetch_workflow_texts_returns_empty_when_no_workflows_dir(
+    httpx2_mock: respx.Router, monkeypatch
+):
+    monkeypatch.setattr("asyncgh.client._auth_token", lambda: "fake-token")
+    httpx2_mock.get(f"{API_BASE}/repos/hugoh/repo/contents/.github/workflows").mock(
+        return_value=httpx.Response(404, json={"message": "Not Found"})
+    )
+    assert await lib.fetch_workflow_texts("hugoh", "repo") == []

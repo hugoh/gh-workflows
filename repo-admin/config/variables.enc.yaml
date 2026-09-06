@@ -1,0 +1,19 @@
+SMTP_HOST: ENC[AES256_GCM,data:R/AaUQ4lgFlcabNq4uOmVw==,iv:08k2UgfoPyT+LnVUzUZqU+0RnsuxeWrCtgrQF/lg+NQ=,tag:QBmEHPPsCoaWFBaUfBG6qw==,type:str]
+SMTP_PORT: ENC[AES256_GCM,data:qfxc,iv:xvOxU1DHb3/fSlNwn+SreBMbBFFqkWLpD+49v8oo3A8=,tag:UixNhgEDUc6kXiT/ePeMzg==,type:str]
+DIGEST_FROM_EMAIL: ENC[AES256_GCM,data:ksrFH2aAxXNXvEDADyMQw/qKK4/Q2p+a,iv:7ETTF4oFRmnhDSERnRwJ9HhyPb/cnM1nRdtpH8SC8kU=,tag:rhllxWAMpkOERAiB9VXAgg==,type:str]
+DIGEST_TO_EMAIL: ENC[AES256_GCM,data:Lwl+Q6HdJO6j642iJN7JzuJv37Z9Wg==,iv:WM/u0rCBQMPDwBxjO2Ws+JlH1QvVTsTRvw9lbNgG57E=,tag:jBPG0VrblEASDfcuwuwjsQ==,type:str]
+sops:
+    age:
+        - enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBDMlZLTjVleUtrQ0FSYXhv
+            OXBnUkdrTmRkc3U3Zm56MDg2Y3Y0OThYd0hVCmtKSGhGbU5JRXZEc0U1Skw0MWVz
+            UXVuM3k4VzRReWhBZjk2UmNJZXd3K0EKLS0tIHMwVGt2U2dKa0Jhd0c5WTk5cHhI
+            Yi9Ha3BOalZ5UG5WMXFPeXlvUm0vSmcKM78eaRnuayjtjOVj4T4BqgLuh+ixPdVH
+            FtWl2BTclRXR0DcecXDjQwU51XOZFS2YqWwmQgTK4tQ1Wx5j5+ML7Q==
+            -----END AGE ENCRYPTED FILE-----
+          recipient: age18z4l4rdxmvk394pkpfk6tdnf4q9g0lrl590w6df9ynzqv8n835us7vr5h5
+    lastmodified: "2026-09-06T13:46:11Z"
+    mac: ENC[AES256_GCM,data:fIZvVeuIqpYYEUf67nrgAnlB9rJpLeDHGdboMpBySpPPYxXfjsd+VhE3LicIwcvSCF+N+WVPomm6rzWFqzbQjOxiPJpVHV/4an2lyFkzyIHK6fF273NiiY1tJwfogxeVRuWugHq88Ff0TeulqTfCOZS1gvAKFwp95zBGpXNJMpY=,iv:R9C44abgsox6gzEYMgWrlcnD6n88We725f7GywHIktk=,tag:jR92M0tOJ47HeRUAYftuDQ==,type:str]
+    unencrypted_suffix: _unencrypted
+    version: 3.13.3

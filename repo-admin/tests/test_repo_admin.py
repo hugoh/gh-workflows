@@ -20,6 +20,13 @@ class _PresentPath:
         return True
 
 
+def _async_return(value):
+    async def _fake(*args, **kwargs):
+        return value
+
+    return _fake
+
+
 def _capturing_list_repos():
     seen = {}
 
@@ -2276,7 +2283,7 @@ async def test_cmd_secrets_edit_errors_when_no_secrets_configured(monkeypatch, c
     monkeypatch.setattr(repo_admin.lib, "default_secrets", dict)
     args = argparse.Namespace()
     assert await repo_admin.cmd_secrets_edit(args) == 1
-    assert "no secrets configured" in capsys.readouterr().err
+    assert "nothing configured in config/secrets.yaml" in capsys.readouterr().err
 
 
 async def test_cmd_secrets_edit_seeds_file_when_missing(monkeypatch):
@@ -2346,6 +2353,179 @@ async def test_cmd_secrets_edit_warns_about_missing_and_stale_keys(monkeypatch, 
 def test_secrets_edit_subcommand_is_registered_in_parser():
     args = repo_admin.build_parser().parse_args(["secrets", "edit"])
     assert args.func == repo_admin.cmd_secrets_edit
+
+
+# ---------------------------------------------------------------------------
+# variables sync / edit
+# ---------------------------------------------------------------------------
+
+
+async def test_variables_sync_worker_apply_calls_set_repo_variable(monkeypatch):
+    calls = []
+
+    async def fake_set_repo_variable(owner, repo_name, name, value):
+        calls.append((owner, repo_name, name, value))
+
+    monkeypatch.setattr(repo_admin.lib, "set_repo_variable", fake_set_repo_variable)
+    worker = repo_admin.make_variables_sync_worker(
+        owner="hugoh", dry_run=False, name="SMTP_HOST", value="mail.example"
+    )
+    result = await worker(REPO)
+    assert result.status == Status.OK
+    assert calls == [("hugoh", "repo", "SMTP_HOST", "mail.example")]
+
+
+async def test_variables_sync_worker_dry_run_does_not_call_set_repo_variable(
+    monkeypatch,
+):
+    async def fail(*a, **k):
+        raise AssertionError("dry-run must not call set_repo_variable")
+
+    monkeypatch.setattr(repo_admin.lib, "set_repo_variable", fail)
+    worker = repo_admin.make_variables_sync_worker(
+        owner="hugoh", dry_run=True, name="SMTP_HOST", value="x"
+    )
+    result = await worker(REPO)
+    assert "would set SMTP_HOST" in result.line
+
+
+async def test_cmd_variables_sync_defaults_to_all_configured_variables(monkeypatch):
+    monkeypatch.setattr(
+        repo_admin.lib, "default_variables", lambda: {"A": ["repo-a"], "B": ["repo-b"]}
+    )
+    monkeypatch.setattr(
+        repo_admin.lib, "decrypt_variables", lambda: {"A": "1", "B": "2"}
+    )
+    seen_only = []
+
+    async def fake_list_repos(owner, *, only=None, skip=None, require_only_match=False):
+        seen_only.append(only)
+        return []
+
+    monkeypatch.setattr(repo_admin, "list_repos", fake_list_repos)
+    args = argparse.Namespace(
+        dry_run=False, repos=[], skip=None, variable=None, verbose=False
+    )
+    assert await repo_admin.cmd_variables_sync(args) == 0
+    assert sorted(seen_only, key=str) == [{"repo-a"}, {"repo-b"}]
+
+
+async def test_cmd_variables_sync_errors_on_unknown_variable_name(monkeypatch, capsys):
+    monkeypatch.setattr(repo_admin.lib, "default_variables", lambda: {"A": ["repo-a"]})
+    args = argparse.Namespace(
+        dry_run=True, repos=[], skip=None, variable="NOPE", verbose=False
+    )
+    assert await repo_admin.cmd_variables_sync(args) == 1
+    err = capsys.readouterr().err
+    assert "NOPE" in err
+    assert "config/variables.yaml" in err
+
+
+def test_variables_sync_subcommand_is_registered_in_parser():
+    args = repo_admin.build_parser().parse_args(
+        ["variables", "sync", "--dry-run", "--variable", "SMTP_HOST"]
+    )
+    assert args.func == repo_admin.cmd_variables_sync
+    assert args.variable == "SMTP_HOST"
+
+
+def test_variables_edit_subcommand_is_registered_in_parser():
+    args = repo_admin.build_parser().parse_args(["variables", "edit"])
+    assert args.func == repo_admin.cmd_variables_edit
+
+
+async def test_cmd_variables_edit_seeds_variables_enc_file_when_missing(monkeypatch):
+    monkeypatch.setattr(
+        repo_admin.lib, "default_variables", lambda: {"SMTP_HOST": ["r"]}
+    )
+    monkeypatch.setattr(repo_admin.lib, "VARIABLES_ENC_FILE", _MissingPath())
+    seeded = []
+    monkeypatch.setattr(repo_admin.lib, "init_variables_file", seeded.append)
+    monkeypatch.setattr(repo_admin.lib, "edit_variables_file", lambda: 0)
+    monkeypatch.setattr(repo_admin.lib, "decrypt_variables", lambda: {"SMTP_HOST": "v"})
+    assert await repo_admin.cmd_variables_edit(argparse.Namespace()) == 0
+    assert seeded == ["SMTP_HOST: ''\n"]
+
+
+# ---------------------------------------------------------------------------
+# config bootstrap
+# ---------------------------------------------------------------------------
+
+
+def test_add_repo_to_config_map_appends_repo_and_reports_it(tmp_path):
+    path = tmp_path / "secrets.yaml"
+    path.write_text("EXISTING:\n  repos: [other]\n")
+    added = repo_admin._add_repo_to_config_map(path, {"EXISTING", "NEW"}, "gh-digest")
+    assert sorted(added) == ["EXISTING", "NEW"]
+    import yaml
+
+    written = yaml.safe_load(path.read_text())
+    assert written["EXISTING"]["repos"] == ["gh-digest", "other"]
+    assert written["NEW"]["repos"] == ["gh-digest"]
+
+
+def test_add_repo_to_config_map_no_write_when_repo_already_listed(tmp_path):
+    path = tmp_path / "secrets.yaml"
+    path.write_text("N:\n  repos: [gh-digest]\n")
+    before = path.read_text()
+    assert repo_admin._add_repo_to_config_map(path, {"N"}, "gh-digest") == []
+    assert path.read_text() == before
+
+
+def test_prompt_missing_values_skips_present_and_writes_new(monkeypatch, tmp_path):
+    enc = _PresentPath()
+    monkeypatch.setattr(repo_admin.lib, "decrypt_variables", lambda: {"HAVE": "old"})
+    written = {}
+    monkeypatch.setattr(
+        repo_admin.lib, "write_enc_file", lambda path, values: written.update(values)
+    )
+    got = repo_admin._prompt_missing_values(
+        enc,
+        {"HAVE", "NEED", "SKIP"},
+        repo_admin.lib.decrypt_variables,
+        lambda prompt: "typed" if "NEED" in prompt else "",
+    )
+    assert got == ["NEED"]
+    assert written == {"HAVE": "old", "NEED": "typed"}
+
+
+async def test_cmd_config_bootstrap_adds_repo_and_prints_next_steps(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        repo_admin.lib,
+        "fetch_workflow_texts",
+        _async_return(["${{ secrets.PAT }} ${{ vars.HOST }}"]),
+    )
+    added = []
+    monkeypatch.setattr(
+        repo_admin,
+        "_add_repo_to_config_map",
+        lambda path, names, repo: added.append((path, set(names), repo)),
+    )
+    monkeypatch.setattr(repo_admin, "_prompt_missing_values", lambda *a, **k: [])
+    assert (
+        await repo_admin.cmd_config_bootstrap(argparse.Namespace(repo="gh-digest")) == 0
+    )
+    out = capsys.readouterr().out
+    assert "secrets sync gh-digest --dry-run" in out
+    assert "variables sync gh-digest --dry-run" in out
+    assert {frozenset(names) for _, names, _ in added} == {
+        frozenset({"PAT"}),
+        frozenset({"HOST"}),
+    }
+
+
+async def test_cmd_config_bootstrap_errors_when_no_workflows(monkeypatch, capsys):
+    monkeypatch.setattr(repo_admin.lib, "fetch_workflow_texts", _async_return([]))
+    assert await repo_admin.cmd_config_bootstrap(argparse.Namespace(repo="r")) == 1
+    assert "no .github/workflows/" in capsys.readouterr().err
+
+
+def test_config_bootstrap_subcommand_is_registered_in_parser():
+    args = repo_admin.build_parser().parse_args(["config", "bootstrap", "gh-digest"])
+    assert args.func == repo_admin.cmd_config_bootstrap
+    assert args.repo == "gh-digest"
 
 
 # ---------------------------------------------------------------------------
