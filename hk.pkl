@@ -16,12 +16,12 @@ local linters = new Mapping<String, Step> {
     }
     ["tool-bumps-tests"] = {
         dir = "tool-bumps"
-        check = "uv run --no-project --python 3.12 python -m unittest discover -p 'test_*.py'"
+        check = "uv run --no-project --python 3.12 --with coverage python -m coverage run -m unittest discover -p 'test_*.py' && uv run --no-project --python 3.12 --with coverage python -m coverage report"
         profiles = List("ci")
     }
     ["mise-latest-versions-tests"] = {
         dir = "mise-latest-versions"
-        check = "uv run --no-project --python 3.12 --with pytest pytest -q"
+        check = "uv run --no-project --python 3.12 --with pytest --with pytest-cov pytest -q --cov --cov-report=term-missing"
         profiles = List("ci")
     }
 }

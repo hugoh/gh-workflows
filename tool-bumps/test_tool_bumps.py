@@ -1,11 +1,15 @@
+import contextlib
+import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-SCRIPT = Path(__file__).resolve().parent / "tool_bumps.py"
+import tool_bumps
 
 
 def git(cwd, *args):
@@ -29,14 +33,16 @@ def commit(cwd, message):
 
 
 def run(cwd, base, *extra):
-    proc = subprocess.run(
-        [sys.executable, str(SCRIPT), base, *extra],
-        cwd=cwd,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return json.loads(proc.stdout)
+    argv = ["tool_bumps.py", base, *extra]
+    buf = io.StringIO()
+    prev = os.getcwd()
+    os.chdir(cwd)
+    try:
+        with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(buf):
+            tool_bumps.main()
+    finally:
+        os.chdir(prev)
+    return json.loads(buf.getvalue())
 
 
 class ToolBumpsTest(unittest.TestCase):
@@ -89,6 +95,10 @@ class ToolBumpsTest(unittest.TestCase):
         commit(self.repo, "bump")
 
         self.assertEqual(run(self.repo, base, "custom.toml"), {"foo": True})
+
+    def test_rejects_wrong_arg_count(self):
+        with self.assertRaises(SystemExit):
+            run(self.repo, "base", "manifest", "extra")
 
 
 if __name__ == "__main__":
