@@ -106,6 +106,22 @@ def _should_retry_graphql(exc: Exception) -> bool | float:
     return _should_retry(exc)
 
 
+def _format_graphql_errors(errors: list[dict]) -> str:
+    """Joins GraphQL `errors[]` into one message, appending each error's
+    `path` (e.g. `r3.pullRequests.nodes.0.commits`) when present -- a
+    partial-permission failure names only "Resource not accessible by
+    personal access token" otherwise, with no hint which repo or field.
+    """
+    parts = []
+    for error in errors:
+        message = error.get("message", str(error))
+        path = error.get("path")
+        if path:
+            message = f"{message} (at {'.'.join(str(segment) for segment in path)})"
+        parts.append(message)
+    return "; ".join(parts)
+
+
 def error_message(response: httpx2.Response) -> str:
     """Extracts GitHub's own `message` field from an error response body,
     falling back to the raw response text if the body isn't JSON, or isn't
@@ -294,13 +310,9 @@ class GitHubClient:
                     if not errors:
                         return body["data"]
                     if any(error.get("type") == "RATE_LIMITED" for error in errors):
-                        raise _GraphQLRateLimited(
-                            "; ".join(
-                                error.get("message", str(error)) for error in errors
-                            )
-                        )
+                        raise _GraphQLRateLimited(_format_graphql_errors(errors))
                     raise GhError(
-                        "; ".join(error.get("message", str(error)) for error in errors),
+                        _format_graphql_errors(errors),
                         error_type=errors[0].get("type"),
                     )
         except _GraphQLRateLimited as exc:
