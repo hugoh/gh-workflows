@@ -114,10 +114,6 @@ jobs:
         id: bumps
 ```
 
-Emailing a weekly digest — see
-[`hugoh/digest-action`](https://github.com/hugoh/digest-action)'s README for
-the full input reference.
-
 ## Why two actions instead of one reusable workflow
 
 `go-tools` and `spoon-tools` each host a single `workflow_call` reusable
