@@ -1,5 +1,5 @@
-"""Repo listing/filtering and the CLI-entrypoint plumbing shared by
-repo-admin's scripts.
+"""Repo listing/filtering and the async-CLI plumbing for scripts that
+operate over a GitHub account's repos.
 
 Fetches repos via `asyncgh.fetch_repos` and runs bounded-parallel work over
 them via `reconcilekit.run_parallel` -- this module adds nothing beyond
@@ -47,8 +47,7 @@ class RepoResult:
 
 def as_set(value: str | None) -> set[str] | None:
     """Splits a comma-separated string into a set, or `None` if `value` is
-    falsy -- the CLI-argument convention every repo-admin script's
-    `--skip`/repo-list arguments share.
+    falsy -- the shared convention for `--skip`/repo-list CLI arguments.
     """
     if not value:
         return None
@@ -98,8 +97,7 @@ async def list_repos(
 ) -> list[Repo]:
     """Fetches every repo for `owner` and applies `filter_repos`.
     `include_forks` defaults to none included -- callers with a
-    file/env-backed fork policy (like repo-admin's) resolve it themselves
-    and pass it in.
+    file/env-backed fork policy resolve it themselves and pass it in.
     """
     # RepoJSON (a TypedDict) isn't assignable to plain dict per ty -- these
     # helpers work on repo JSON generically, not asyncgh's specific shape.
@@ -113,7 +111,7 @@ def run_cli(
 ) -> int:
     """Runs an async CLI entrypoint under asyncio, always closing the shared
     HTTP client afterwards and turning a GhError into a stderr message plus
-    exit code 1 -- the wrapper every repo-admin-style script's main() shares.
+    exit code 1 -- the wrapper an async repo-operating script's main() shares.
     """
 
     async def _run() -> int:
