@@ -2,16 +2,19 @@ import base64
 import json
 
 import httpx
+import pytest
 import respx
 from nacl import encoding, public
 
 from asyncgh import (
     API_BASE,
+    GhError,
     encrypt_secret_value,
     fetch_repos,
     get_repo_public_key,
     public_repos,
     set_repo_secret,
+    set_repo_variable,
 )
 
 
@@ -173,3 +176,47 @@ async def test_set_repo_secret_reuses_a_passed_in_public_key(
     )
 
     _assert_put_body_encrypts(put_route, private_key, b"the-value")
+
+
+async def test_set_repo_variable_patches_an_existing_variable(
+    httpx2_mock: respx.Router,
+):
+    patch_route = httpx2_mock.patch(
+        f"{API_BASE}/repos/hugoh/repo/actions/variables/NAME"
+    ).mock(return_value=httpx.Response(204))
+
+    await set_repo_variable("hugoh", "repo", "NAME", "the-value")
+
+    assert patch_route.call_count == 1
+    assert json.loads(patch_route.calls[0].request.content) == {
+        "name": "NAME",
+        "value": "the-value",
+    }
+
+
+async def test_set_repo_variable_creates_when_patch_returns_404(
+    httpx2_mock: respx.Router,
+):
+    httpx2_mock.patch(f"{API_BASE}/repos/hugoh/repo/actions/variables/NAME").mock(
+        return_value=httpx.Response(404, json={"message": "Not Found"})
+    )
+    post_route = httpx2_mock.post(
+        f"{API_BASE}/repos/hugoh/repo/actions/variables"
+    ).mock(return_value=httpx.Response(201))
+
+    await set_repo_variable("hugoh", "repo", "NAME", "the-value")
+
+    assert post_route.call_count == 1
+    assert json.loads(post_route.calls[0].request.content) == {
+        "name": "NAME",
+        "value": "the-value",
+    }
+
+
+async def test_set_repo_variable_raises_on_a_non_404_error(httpx2_mock: respx.Router):
+    httpx2_mock.patch(f"{API_BASE}/repos/hugoh/repo/actions/variables/NAME").mock(
+        return_value=httpx.Response(422, json={"message": "Unprocessable"})
+    )
+
+    with pytest.raises(GhError):
+        await set_repo_variable("hugoh", "repo", "NAME", "the-value")

@@ -30,6 +30,7 @@ from .endpoints import (
     get_repo_public_key,
     public_repos,
     set_repo_secret,
+    set_repo_variable,
 )
 
 __all__ = [
@@ -48,4 +49,5 @@ __all__ = [
     "paginated",
     "public_repos",
     "set_repo_secret",
+    "set_repo_variable",
 ]

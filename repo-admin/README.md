@@ -120,14 +120,14 @@ uv run repo_admin.py <resource> <verb> [repo ...] \
   for exactly those with no API calls; with none, auto-discovers repos with
   Pages enabled but missing from `config/pages-domains.yaml` (the same set
   `pages status` flags) and suggests entries for those.
-- **`secrets sync [--dry-run] [--secret name1,name2]`** — pushes shared
-  GitHub Actions secrets (name → target-repo list in `config/secrets.yaml`,
-  values sops-encrypted in `config/secrets.enc.yaml`) to each configured
-  repo via GitHub's REST API, encrypting each value in-process with PyNaCl
-  for the target repo's public key — the plaintext value is never written
-  to disk or passed as a subprocess argument. Trailing repo names / `--skip`
-  filter repo names *within* each secret's configured repo list, same as
-  every other command; `--secret` narrows which secret names from
+- **`secrets sync [--dry-run] [--secret name1,name2]`** — pushes GitHub
+  Actions secrets (name → target-repo list in `config/secrets.yaml`, values
+  sops-encrypted in `config/secrets.enc.yaml`) to each configured repo via
+  GitHub's REST API, encrypting each value in-process with PyNaCl for the
+  target repo's public key — the plaintext value is never written to disk
+  or passed as a subprocess argument. Trailing repo names / `--skip` filter
+  repo names *within* each secret's configured repo list, same as every
+  other command; `--secret` narrows which secret names from
   `config/secrets.yaml` to sync (defaults to all of them). GitHub's API
   never returns a secret's existing value, so there's no unchanged/changed
   detection — `--dry-run` just reports which repos would receive each
@@ -149,6 +149,22 @@ uv run repo_admin.py <resource> <verb> [repo ...] \
   block. After editing, warns (doesn't fail) about drift against
   `config/secrets.yaml`: a configured secret left with no value, or a value
   left over from a removed/renamed secret.
+- **`variables sync`** / **`variables edit`** — identical to the two
+  `secrets` commands above in every way, operating on
+  `config/variables.yaml` + `config/variables.enc.yaml` and GitHub's
+  Actions *variables* API (`lib.set_repo_variable`, PATCH-or-POST). A
+  repo's variables aren't sensitive, but keeping the two configs the same
+  shape means one bootstrap path and one edit command for both. `--variable`
+  narrows which names to sync.
+- **`config bootstrap REPO`** — first-run helper for a repo. Reads which
+  `secrets.*` / `vars.*` its `.github/workflows/` reference (fetched from
+  GitHub, so the list can't drift from the workflow file), adds `REPO` to
+  `config/secrets.yaml` and `config/variables.yaml` under those names, then
+  prompts (hidden for secrets) for any value not already in the encrypted
+  stores and writes it back through `sops`. Populating config and applying
+  it stay separate — it finishes by printing the `secrets sync` /
+  `variables sync` commands to run next. Replaces the old per-repo
+  `setup-config.py` bootstrap scripts.
 - **`activity`** — reports recent commit activity per repo, ranked by an
   exponential recency-decay score. See `activity.py`'s header comment.
 

@@ -15,7 +15,7 @@ from typing import TypedDict, cast
 
 from nacl import encoding, public
 
-from .client import GitHubClient, _get_default_client
+from .client import GhError, GitHubClient, _get_default_client, error_message
 
 
 class RepoJSON(TypedDict, total=False):
@@ -122,3 +122,36 @@ async def set_repo_secret(
         f"/repos/{owner}/{repo_name}/actions/secrets/{secret_name}",
         json={"encrypted_value": encrypted_value, "key_id": key_data["key_id"]},
     )
+
+
+async def set_repo_variable(
+    owner: str,
+    repo_name: str,
+    name: str,
+    value: str,
+    *,
+    client: GitHubClient | None = None,
+) -> None:
+    """Creates or updates one repo's Actions variable via GitHub's REST API.
+
+    GitHub splits this across two endpoints -- POST .../actions/variables to
+    create, PATCH .../actions/variables/{name} to update -- so this PATCHes
+    first and falls back to POST on the 404 a not-yet-existing variable
+    returns. Unlike a secret, a variable's value is plaintext both in the
+    request and in GitHub's API responses.
+    """
+    client = client or _get_default_client()
+    response = await client.api_raw(
+        "PATCH",
+        f"/repos/{owner}/{repo_name}/actions/variables/{name}",
+        json={"name": name, "value": value},
+    )
+    if response.status_code == 404:
+        await client.api_json(
+            "POST",
+            f"/repos/{owner}/{repo_name}/actions/variables",
+            json={"name": name, "value": value},
+        )
+        return
+    if not response.is_success:
+        raise GhError(error_message(response), status_code=response.status_code)
