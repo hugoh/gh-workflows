@@ -56,7 +56,7 @@ jobs:
 
       - id: bump
         if: inputs.tag == ''
-        uses: hugoh/gh-workflows/cog-bump@1d2a18056f2122b7f49c2e8aacb48c40cb6eaab9 # v1.24.0
+        uses: hugoh/cog-bump@33bfd335a437a1cf30db4cf9a2710fc9f4d31ec9 # v0.1.0
 
       - name: Create a GitHub release
         id: release
