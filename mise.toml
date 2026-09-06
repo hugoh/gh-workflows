@@ -30,3 +30,8 @@ run = "uv run --no-project --python 3.12 python -m unittest discover -p 'test_*.
 description = "Run the mise-latest-versions test suite"
 dir = "mise-latest-versions"
 run = "uv run --no-project --python 3.12 --with pytest pytest -q"
+
+[tasks."test:trim-releases"]
+description = "Run the trim-releases test suite"
+dir = "trim-releases"
+run = "uv run --no-project --python 3.12 --with pytest pytest -q"

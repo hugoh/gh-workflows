@@ -1,0 +1,48 @@
+name: trim-releases
+description: >
+  Delete old GitHub releases with `gh`: keep the newest N full releases and
+  the newest M prereleases, and drop those newest prereleases once they pass
+  an age cutoff. Needs `gh` on PATH (default on GitHub runners) and a token
+  with `contents: write` in GH_TOKEN.
+inputs:
+  dry-run:
+    description: Only print what would be deleted
+    required: false
+    default: "false"
+  keep-full:
+    description: Number of newest full releases to keep
+    required: false
+    default: "10"
+  keep-prereleases:
+    description: Number of newest prereleases to keep
+    required: false
+    default: "3"
+  prerelease-cutoff-days:
+    description: Delete kept prereleases once older than this many days
+    required: false
+    default: "14"
+  github-token:
+    description: Token with contents:write for the target repo
+    required: false
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - id: trim
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        KEEP_FULL: ${{ inputs.keep-full }}
+        KEEP_PRERELEASES: ${{ inputs.keep-prereleases }}
+        PRERELEASE_CUTOFF_DAYS: ${{ inputs.prerelease-cutoff-days }}
+      run: |
+        set -euo pipefail
+        args=(
+          --keep-full "$KEEP_FULL"
+          --keep-prereleases "$KEEP_PRERELEASES"
+          --prerelease-cutoff-days "$PRERELEASE_CUTOFF_DAYS"
+        )
+        if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+        python3 "$GITHUB_ACTION_PATH/trim_releases.py" "${args[@]}" \
+          | tee -a "$GITHUB_STEP_SUMMARY"
