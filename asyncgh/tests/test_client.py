@@ -244,6 +244,32 @@ async def test_graphql_raises_gh_error_when_errors_present_alongside_partial_dat
         await graphql("query { r0 r1 }")
 
 
+async def test_graphql_error_message_includes_the_error_path(
+    httpx2_mock: respx.Router,
+):
+    httpx2_mock.post(f"{API_BASE}/graphql").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {"r3": None},
+                "errors": [
+                    {
+                        "type": "FORBIDDEN",
+                        "message": "Resource not accessible by personal access token",
+                        "path": ["r3", "pullRequests", "nodes", 0, "commits"],
+                    }
+                ],
+            },
+        )
+    )
+    with pytest.raises(
+        GhError,
+        match=r"personal access token \(at r3\.pullRequests\.nodes\.0\.commits\)",
+    ) as exc_info:
+        await graphql("query { r3 { pullRequests { nodes { commits } } } }")
+    assert exc_info.value.error_type == "FORBIDDEN"
+
+
 async def test_graphql_retries_on_transport_error(httpx2_mock: respx.Router):
     route = httpx2_mock.post(f"{API_BASE}/graphql").mock(
         side_effect=[
