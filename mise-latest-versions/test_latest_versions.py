@@ -1,12 +1,8 @@
+import io
 import json
-import subprocess
-import sys
-from pathlib import Path
 
 import pytest
-from latest_versions import latest_series
-
-SCRIPT = Path(__file__).resolve().parent / "latest_versions.py"
+from latest_versions import latest_series, main
 
 
 @pytest.mark.parametrize(
@@ -45,35 +41,28 @@ def test_latest_series(versions, level, count, expected):
     assert latest_series(versions, level, count) == expected
 
 
-def test_cli_minor_default():
-    proc = subprocess.run(
-        [sys.executable, str(SCRIPT)],
-        input="0.41.0\n0.42.0\n0.43.0\n0.44.0\n",
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert json.loads(proc.stdout) == ["0.42", "0.43", "0.44"]
+@pytest.fixture
+def run_main(monkeypatch, capsys):
+    def run(argv, stdin):
+        monkeypatch.setattr("sys.argv", ["latest_versions.py", *argv])
+        monkeypatch.setattr("sys.stdin", io.StringIO(stdin))
+        main()
+        return capsys.readouterr().out
+
+    return run
 
 
-def test_cli_major_level():
-    proc = subprocess.run(
-        [sys.executable, str(SCRIPT), "major", "2"],
-        input="1.9.0\n2.0.0\n3.1.0\n",
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert json.loads(proc.stdout) == ["2", "3"]
+def test_cli_minor_default(run_main):
+    out = run_main([], "0.41.0\n0.42.0\n0.43.0\n0.44.0\n")
+    assert json.loads(out) == ["0.42", "0.43", "0.44"]
 
 
-def test_cli_rejects_bad_level():
-    proc = subprocess.run(
-        [sys.executable, str(SCRIPT), "weekly"],
-        input="1.0.0\n",
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert proc.returncode != 0
-    assert "level must be one of" in proc.stderr
+def test_cli_major_level(run_main):
+    out = run_main(["major", "2"], "1.9.0\n2.0.0\n3.1.0\n")
+    assert json.loads(out) == ["2", "3"]
+
+
+def test_cli_rejects_bad_level(run_main):
+    with pytest.raises(SystemExit) as excinfo:
+        run_main(["weekly"], "1.0.0\n")
+    assert "level must be one of" in str(excinfo.value)

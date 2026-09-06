@@ -1,0 +1,9 @@
+[run]
+branch = true
+source = tool_bumps
+
+[report]
+fail_under = 80
+show_missing = true
+exclude_also =
+    if __name__ == .__main__.:

@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 dist/
 public/
+.coverage
+.coverage.*
+htmlcov/
