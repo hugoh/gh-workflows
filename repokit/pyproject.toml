@@ -1,7 +1,7 @@
 [project]
 name = "hugoh-repokit"
 version = "0.1.2"
-description = "Repo listing/filtering and CLI-entrypoint plumbing shared by repo-admin's scripts"
+description = "Toolkit for scripts that operate over a GitHub account's repos: list/filter them, run an async CLI, fan work out with bounded concurrency"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
