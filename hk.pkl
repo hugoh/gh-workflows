@@ -24,6 +24,11 @@ local linters = new Mapping<String, Step> {
         check = "uv run --no-project --python 3.12 --with pytest --with pytest-cov pytest -q --cov --cov-report=term-missing"
         profiles = List("ci")
     }
+    ["trim-releases-tests"] = {
+        dir = "trim-releases"
+        check = "uv run --no-project --python 3.12 --with pytest --with pytest-cov pytest -q --cov --cov-report=term-missing --cov-fail-under=100"
+        profiles = List("ci")
+    }
 }
 
 hooks {

@@ -17,6 +17,7 @@ Actions ([usage](#usage)):
 - [`hk-check`](#actions) — runs `hk check`
 - [`tool-bumps`](#actions) — mise tool-bump detection for gating jobs
 - [`mise-latest-versions`](#actions) — version matrix for a mise tool
+- [`trim-releases`](#actions) — delete old GitHub releases on a retention policy
 - [`hugoh/cog-bump`](https://github.com/hugoh/cog-bump) — `cog bump` with the
   canonical fleet `cog.toml` (separate repo)
 - [`hugoh/digest-action`](https://github.com/hugoh/digest-action) — account
@@ -45,6 +46,14 @@ Reusable workflows:
   e.g. `level: minor` → `["0.42","0.43","0.44"]`, `level: major, count: 2` →
   `["1","2"]`. Needs `mise` on `PATH` (run `setup` first). `go-tools`'
   `go-tool-compat.yml` reusable workflow wraps this.
+- **`trim-releases`** — deletes old GitHub releases with `gh`: keeps the
+  newest `keep-full` full releases (default `10`) and the newest
+  `keep-prereleases` prereleases (default `3`), and drops those kept
+  prereleases once older than `prerelease-cutoff-days` (default `14`). Set
+  `dry-run: true` to only print. Needs `gh` on `PATH` (default on GitHub
+  runners) and a `contents: write` token (`github-token`, defaults to
+  `github.token`); no checkout required. Callers keep their own `schedule` /
+  `workflow_dispatch` triggers.
 - **[`hugoh/cog-bump`](https://github.com/hugoh/cog-bump)** — `cog bump` with
   the canonical fleet `cog.toml` (`tag_prefix = "v"`, `disable_changelog`,
   `disable_bump_commit` → tag-only, no commit). Pushes the tag by default;
@@ -113,6 +122,29 @@ jobs:
           fetch-depth: 0
       - uses: hugoh/gh-workflows/tool-bumps@<pinned-sha>
         id: bumps
+```
+
+Trimming old releases on a schedule:
+
+```yaml
+name: Trim Old Releases
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        type: boolean
+        default: false
+  schedule:
+    - cron: "0 8 * * 0"
+permissions:
+  contents: write
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: hugoh/gh-workflows/trim-releases@<pinned-sha>
+        with:
+          dry-run: ${{ inputs.dry_run }}
 ```
 
 ## Why two actions instead of one reusable workflow
