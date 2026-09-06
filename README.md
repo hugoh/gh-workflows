@@ -1,10 +1,13 @@
 # gh-workflows
 
-Shared, reusable GitHub Actions for hugoh's repos — the checkout + mise + `hk
-check` sequence that most repos run in CI, split into two composable actions
-so repos with extra setup steps (installing an apt package, running a build)
-can insert them in the right place. It also hosts a uv workspace of Python
-packages behind those repos' tooling.
+Shared, reusable GitHub Actions and workflows for hugoh's repos — the
+checkout, mise, and `hk check` sequence that most repos run in CI, split into
+composable actions so repos with extra setup steps (installing an apt package,
+running a build) can insert them in the right place.
+
+The `repo-admin` CLI, the scaffold templates, and the
+`asyncgh`/`reconcilekit`/`repokit` packages that used to live here are now in
+[`hugoh/fleet-tools`](https://github.com/hugoh/fleet-tools).
 
 ## Contents
 
@@ -19,15 +22,12 @@ Actions ([usage](#usage)):
 - [`hugoh/digest-action`](https://github.com/hugoh/digest-action) — account
   activity digest (separate repo)
 
-Packages ([details](#packages)):
+Reusable workflows:
 
-- [`repo-admin/`](repo-admin/README.md) — bulk repo settings + activity CLI
-- [`asyncgh/`](asyncgh/README.md) — async GitHub REST/GraphQL transport
-  ([PyPI](https://pypi.org/project/asyncgh/))
-- [`reconcilekit/`](reconcilekit/README.md) — fetch-diff-apply reconcile
-  kernel ([PyPI](https://pypi.org/project/reconcilekit/))
-- [`repokit/`](repokit/README.md) — repo listing/filtering + CLI plumbing
-  ([PyPI](https://pypi.org/project/hugoh-repokit/))
+- `.github/workflows/hk.yml` — `workflow_call` wrapper around `setup` +
+  `hk-check` (inputs: `fetch-depth`, `pre-hk`, `apt-packages`)
+- `.github/workflows/release.yml` — `workflow_call` tag + GitHub Release via
+  `hugoh/cog-bump` (inputs: `tag`, `notes`, `major-tag`)
 
 ## Actions
 
@@ -55,8 +55,9 @@ Packages ([details](#packages)):
 - **[`hugoh/digest-action`](https://github.com/hugoh/digest-action)** —
   builds (and optionally emails) an HTML digest of a GitHub account's repo
   activity. A separate repo (not part of this one) since GitHub Marketplace
-  only publishes an Action from a repository root; depends on this repo's
-  `repokit`/`asyncgh` PyPI packages.
+  only publishes an Action from a repository root; depends on the
+  `repokit`/`asyncgh` PyPI packages from
+  [`hugoh/fleet-tools`](https://github.com/hugoh/fleet-tools).
 
 ## Usage
 
@@ -122,21 +123,3 @@ exact same steps. The remaining repos aren't uniform — a couple need an extra
 step interleaved between mise setup and the `hk check` — so this repo splits
 the same logic into two composable actions instead, which callers can wrap
 their own steps around.
-
-## Packages
-
-This repo also hosts a uv workspace of Python packages behind `repo-admin`'s
-scripts, each with its own README:
-
-- **[`repo-admin/`](repo-admin/README.md)** — bulk repo settings and the
-  account-activity CLI tool
-- **[`asyncgh/`](asyncgh/README.md)** — the GitHub REST + GraphQL transport
-  (auth, retry, pagination) they share ([PyPI](https://pypi.org/project/asyncgh/))
-- **[`reconcilekit/`](reconcilekit/README.md)** — the domain-agnostic
-  fetch-diff-apply reconcile kernel `repo-admin`'s `sync` commands run on
-  ([PyPI](https://pypi.org/project/reconcilekit/))
-- **[`repokit/`](repokit/README.md)** — repo listing/filtering and
-  CLI-entrypoint plumbing, published to PyPI
-  ([`hugoh-repokit`](https://pypi.org/project/hugoh-repokit/)) so
-  [`hugoh/digest-action`](https://github.com/hugoh/digest-action) (a
-  separate repo) can depend on it too

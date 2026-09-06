@@ -16,47 +16,17 @@ tombi = "1.5.1"
 biome = "2.5.10"
 ruff = "0.16.6"
 ty = "0.0.78"
-sops = "3.13.3"
 
 [tasks.test]
-description = "Run every Python test suite"
+description = "Run the action helper test suites"
 depends = ["test:*"]
 
-[tasks."test:repo-admin"]
-description = "Run the repo-admin test suite"
-dir = "repo-admin"
-run = "uv run pytest"
+[tasks."test:tool-bumps"]
+description = "Run the tool-bumps test suite"
+dir = "tool-bumps"
+run = "uv run --no-project --python 3.12 python -m unittest discover -p 'test_*.py'"
 
-[tasks."test:reconcilekit"]
-description = "Run the reconcilekit test suite"
-dir = "reconcilekit"
-run = "uv run pytest"
-
-[tasks."test:asyncgh"]
-description = "Run the asyncgh test suite"
-dir = "asyncgh"
-run = "uv run pytest"
-
-[tasks."test:repokit"]
-description = "Run the repokit test suite"
-dir = "repokit"
-run = "uv run pytest"
-
-[tasks.docs]
-description = "Build API docs for every documented package into public/"
-depends = ["docs:*"]
-
-[tasks."docs:asyncgh"]
-description = "Build asyncgh's API docs"
-dir = "asyncgh"
-run = "uv run --with pdoc pdoc asyncgh --output-directory ../public/asyncgh"
-
-[tasks."docs:reconcilekit"]
-description = "Build reconcilekit's API docs"
-dir = "reconcilekit"
-run = "uv run --with pdoc pdoc reconcilekit --output-directory ../public/reconcilekit"
-
-[tasks."docs:repokit"]
-description = "Build repokit's API docs"
-dir = "repokit"
-run = "uv run --with pdoc pdoc repokit --output-directory ../public/repokit"
+[tasks."test:mise-latest-versions"]
+description = "Run the mise-latest-versions test suite"
+dir = "mise-latest-versions"
+run = "uv run --no-project --python 3.12 --with pytest pytest -q"
