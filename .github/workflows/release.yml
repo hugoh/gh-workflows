@@ -18,6 +18,18 @@ on: # yamllint disable-line rule:truthy
         description: Also force-move the vN major tag to the new release (for Marketplace actions)
         type: boolean
         default: false
+      package-command:
+        description: >-
+          Shell command that builds release artifacts, run after checkout with
+          the repo's mise tools on PATH. Skipped when empty.
+        type: string
+        default: ""
+      package-artifacts:
+        description: >-
+          Glob(s) of files produced by package-command to attach to the GitHub
+          Release. Required when package-command is set.
+        type: string
+        default: ""
     outputs:
       tag:
         description: The tag that was released, or empty when there was nothing to release
@@ -30,6 +42,14 @@ on: # yamllint disable-line rule:truthy
         type: string
       notes:
         description: "Release notes body (default: GitHub auto-generated notes)"
+        required: false
+        type: string
+      package-command:
+        description: Shell command that builds release artifacts (mise tools on PATH). Skipped when empty.
+        required: false
+        type: string
+      package-artifacts:
+        description: Glob(s) of files to attach to the Release. Required when package-command is set.
         required: false
         type: string
 
@@ -57,6 +77,12 @@ jobs:
       - id: bump
         if: inputs.tag == ''
         uses: hugoh/cog-bump@33bfd335a437a1cf30db4cf9a2710fc9f4d31ec9 # v0.1.0
+
+      - if: inputs.package-command != ''
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        env:
+          MISE_HTTP_TIMEOUT: 120s
+          MISE_FETCH_REMOTE_VERSIONS_TIMEOUT: 60s
 
       - name: Create a GitHub release
         id: release
@@ -87,3 +113,16 @@ jobs:
             || gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
               -f "ref=refs/tags/${major}" -f "sha=${sha}"
           fi
+
+      - name: Build and attach release artifacts
+        if: inputs.package-command != '' && steps.release.outputs.tag != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+          PACKAGE_COMMAND: ${{ inputs.package-command }}
+          PACKAGE_ARTIFACTS: ${{ inputs.package-artifacts }}
+        run: |
+          set -euo pipefail
+          bash -c "$PACKAGE_COMMAND"
+          # shellcheck disable=SC2086  # deliberate glob/word-split for multiple artifact patterns
+          gh release upload "$TAG" $PACKAGE_ARTIFACTS
