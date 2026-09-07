@@ -1,10 +1,7 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>hugoh/renovate-config"],
-  "packageRules": [
-    {
-      "matchManagers": ["github-actions"],
-      "semanticCommitType": "fix"
-    }
+  "extends": [
+    "github>hugoh/renovate-config",
+    "github>hugoh/renovate-config//presets/action-repo"
   ]
 }
