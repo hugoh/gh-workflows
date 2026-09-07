@@ -29,7 +29,11 @@ Reusable workflows:
   `hk-check` (inputs: `fetch-depth`, `pre-hk`, `apt-packages`,
   `extra-cache-key-cmd`, `extra-cache-paths` — see `setup`)
 - `.github/workflows/release.yml` — `workflow_call` tag + GitHub Release via
-  `hugoh/cog-bump` (inputs: `tag`, `notes`, `major-tag`)
+  `hugoh/cog-bump` (inputs: `tag`, `notes`, `major-tag`, `package-command`,
+  `package-artifacts`). `package-command` runs after the release is cut with
+  `$TAG` (e.g. `v1.2.3`) and `$VERSION` (without the leading `v`) exported and
+  the repo's mise tools on `PATH`; the files it produces (`package-artifacts`
+  glob) are uploaded to the Release.
 - `.github/workflows/secret-scan.yml` — `workflow_call` TruffleHog OSS secret
   scan: diffs on push/PR, full history on `schedule`/`workflow_dispatch`,
   reports only verified findings. Complements the gitleaks step `hk check` already
