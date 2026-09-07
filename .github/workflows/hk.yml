@@ -56,7 +56,11 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: ${{ inputs.fetch-depth || '1' }}
-      - uses: ./mise-cache # zizmor: ignore[self-repository]
+      # Referenced by full path, not "./mise-cache": a relative local-action
+      # path resolves against the calling workflow's checked-out workspace,
+      # not this repo, so it breaks for every external caller of hk.yml.
+      # Pinned to a commit already containing mise-cache/action.yml unchanged.
+      - uses: hugoh/gh-workflows/mise-cache@a191c18cc9ce938094c23cc77493a1b9b1c27573 # v1.33.0
         with:
           key-cmd: ${{ inputs.extra-cache-key-cmd }}
           paths: ${{ inputs.extra-cache-paths }}
