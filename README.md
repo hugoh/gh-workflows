@@ -30,6 +30,11 @@ Reusable workflows:
   `extra-cache-key-cmd`, `extra-cache-paths` — see `setup`)
 - `.github/workflows/release.yml` — `workflow_call` tag + GitHub Release via
   `hugoh/cog-bump` (inputs: `tag`, `notes`, `major-tag`)
+- `.github/workflows/secret-scan.yml` — `workflow_call` TruffleHog OSS secret
+  scan: diffs on push/PR, full history on `schedule`/`workflow_dispatch`,
+  reports only verified findings. Complements the gitleaks step `hk check` already
+  runs by verifying findings against the live provider and sweeping history
+  that predates gitleaks adoption. No inputs.
 
 ## Actions
 
@@ -156,6 +161,23 @@ jobs:
       - uses: hugoh/gh-workflows/trim-releases@<pinned-sha>
         with:
           dry-run: ${{ inputs.dry_run }}
+```
+
+Secret scanning (diffs on push/PR, full history weekly):
+
+```yaml
+name: secret-scan
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "11 4 * * 1"
+  workflow_dispatch:
+permissions: {}
+jobs:
+  secret-scan:
+    uses: hugoh/gh-workflows/.github/workflows/secret-scan.yml@<pinned-sha>
 ```
 
 ## Why two actions instead of one reusable workflow
