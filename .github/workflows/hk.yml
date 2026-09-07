@@ -68,8 +68,8 @@ jobs:
         if: inputs.extra-cache-key-cmd != ''
         with:
           path: ${{ inputs.extra-cache-paths }}
-          key: ${{ runner.os }}-mise-${{ steps.extra-cache-key.outputs.hash }}
-          restore-keys: ${{ runner.os }}-mise-
+          key: ${{ runner.os }}-extra-${{ steps.extra-cache-key.outputs.hash }}
+          restore-keys: ${{ runner.os }}-extra-
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         env:
           MISE_HTTP_TIMEOUT: 120s
