@@ -22,8 +22,10 @@ on: # yamllint disable-line rule:truthy
       extra-cache-key-cmd:
         description: >
           Shell command whose stdout determines an extra cache key for mise
-          tools that are expensive to install (see mise-cache/action.yml).
-          Leave empty to skip.
+          tools that are expensive to install (built from source, heavy
+          postinstall hooks) - hash just the relevant slice of your mise.toml
+          instead of the whole file, so unrelated tool bumps don't bust the
+          cache. Leave empty to skip.
         type: string
         default: ""
       extra-cache-paths:
@@ -56,10 +58,21 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: ${{ inputs.fetch-depth || '1' }}
-      - uses: ./mise-cache # zizmor: ignore[self-repository]
+      - name: Compute extra mise cache key
+        if: inputs.extra-cache-key-cmd != ''
+        id: extra-cache-key
+        shell: bash
+        env:
+          EXTRA_CACHE_KEY_CMD: ${{ inputs.extra-cache-key-cmd }}
+        run: |
+          hash=$(bash -c "$EXTRA_CACHE_KEY_CMD" | sha256sum | cut -d' ' -f1)
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: inputs.extra-cache-key-cmd != ''
         with:
-          key-cmd: ${{ inputs.extra-cache-key-cmd }}
-          paths: ${{ inputs.extra-cache-paths }}
+          path: ${{ inputs.extra-cache-paths }}
+          key: ${{ runner.os }}-mise-${{ steps.extra-cache-key.outputs.hash }}
+          restore-keys: ${{ runner.os }}-mise-
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         env:
           MISE_HTTP_TIMEOUT: 120s
