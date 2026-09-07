@@ -26,13 +26,25 @@ Actions ([usage](#usage)):
 Reusable workflows:
 
 - `.github/workflows/hk.yml` — `workflow_call` wrapper around `setup` +
-  `hk-check` (inputs: `fetch-depth`, `pre-hk`, `apt-packages`)
+  `hk-check` (inputs: `fetch-depth`, `pre-hk`, `apt-packages`,
+  `extra-cache-key-cmd`, `extra-cache-paths` — see `mise-cache`)
 - `.github/workflows/release.yml` — `workflow_call` tag + GitHub Release via
   `hugoh/cog-bump` (inputs: `tag`, `notes`, `major-tag`)
 
 ## Actions
 
-- **`setup`** — checks out the repo and sets up mise
+- **`setup`** — checks out the repo and sets up mise. Inputs: `fetch-depth`,
+  `extra-cache-key-cmd`, `extra-cache-paths` — see `mise-cache`
+- **`mise-cache`** — caches a subset of mise's installed tools, keyed on the
+  stdout of a caller-supplied `key-cmd` instead of the whole mise config.
+  For tools that are expensive to install (built from source, heavy
+  postinstall hooks), hashing the whole config busts the cache on every
+  unrelated tool version bump; the caller instead extracts just the
+  relevant bits of its `mise.toml` (e.g. one tool's pinned version plus its
+  `[hooks]` block) and passes the paths to cache under that key
+  (`paths`, newline-separated). No-ops if `key-cmd` is empty. `setup` and
+  `.github/workflows/hk.yml` both wire this in between checkout and mise
+  install.
 - **`hk-check`** — runs `hk check --no-progress --profile ci --all --no-fail-fast`
   (every check runs even after one fails, so all failures surface in one pass)
 - **`tool-bumps`** — emits a `tools` output: a JSON map of which `mise.toml`
