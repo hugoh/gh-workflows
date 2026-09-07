@@ -77,7 +77,7 @@ jobs:
 
       - id: bump
         if: inputs.tag == ''
-        uses: hugoh/cog-bump@9b73d50a94561642c911d2c876aedf20e2fc3ee4 # v0.1.1
+        uses: hugoh/cog-bump@0a5b6eb1c0c7eb8cf876a0ffaa06d27cb92f63db # v0.2.0
 
       - if: inputs.package-command != ''
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
