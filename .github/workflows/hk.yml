@@ -19,6 +19,17 @@ on: # yamllint disable-line rule:truthy
         description: Space-separated apt packages the lint job needs (cached)
         type: string
         default: ""
+      extra-cache-key-cmd:
+        description: >
+          Shell command whose stdout determines an extra cache key for mise
+          tools that are expensive to install (see mise-cache/action.yml).
+          Leave empty to skip.
+        type: string
+        default: ""
+      extra-cache-paths:
+        description: Newline-separated paths to cache under that key.
+        type: string
+        default: ""
 
 permissions: {}
 
@@ -45,6 +56,10 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: ${{ inputs.fetch-depth || '1' }}
+      - uses: ./mise-cache # zizmor: ignore[self-repository]
+        with:
+          key-cmd: ${{ inputs.extra-cache-key-cmd }}
+          paths: ${{ inputs.extra-cache-paths }}
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         env:
           MISE_HTTP_TIMEOUT: 120s
