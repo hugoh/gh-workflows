@@ -21,7 +21,8 @@ on: # yamllint disable-line rule:truthy
       package-command:
         description: >-
           Shell command that builds release artifacts, run after checkout with
-          the repo's mise tools on PATH. Skipped when empty.
+          the repo's mise tools on PATH and with $TAG (e.g. v1.2.3) and
+          $VERSION (the same without the leading v) exported. Skipped when empty.
         type: string
         default: ""
       package-artifacts:
@@ -45,7 +46,7 @@ on: # yamllint disable-line rule:truthy
         required: false
         type: string
       package-command:
-        description: Shell command that builds release artifacts (mise tools on PATH). Skipped when empty.
+        description: Shell command that builds release artifacts (mise tools on PATH, $TAG/$VERSION exported). Skipped when empty.
         required: false
         type: string
       package-artifacts:
@@ -123,6 +124,7 @@ jobs:
           PACKAGE_ARTIFACTS: ${{ inputs.package-artifacts }}
         run: |
           set -euo pipefail
+          export VERSION="${TAG#v}"
           bash -c "$PACKAGE_COMMAND"
           # shellcheck disable=SC2086  # deliberate glob/word-split for multiple artifact patterns
           gh release upload "$TAG" $PACKAGE_ARTIFACTS
