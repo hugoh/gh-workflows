@@ -21,11 +21,8 @@ on: # yamllint disable-line rule:truthy
         default: ""
       extra-cache-key-cmd:
         description: >
-          Shell command whose stdout determines an extra cache key for mise
-          tools that are expensive to install (built from source, heavy
-          postinstall hooks) - hash just the relevant slice of your mise.toml
-          instead of the whole file, so unrelated tool bumps don't bust the
-          cache. Leave empty to skip.
+          Shell command whose stdout determines an extra cache key Leave
+          empty to skip.
         type: string
         default: ""
       extra-cache-paths:
@@ -58,7 +55,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: ${{ inputs.fetch-depth || '1' }}
-      - name: Compute extra mise cache key
+      - name: Compute extra cache key
         if: inputs.extra-cache-key-cmd != ''
         id: extra-cache-key
         shell: bash
