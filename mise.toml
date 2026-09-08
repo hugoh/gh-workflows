@@ -16,6 +16,38 @@ tombi = "1.5.1"
 biome = "2.5.10"
 ruff = "0.16.6"
 ty = "0.0.78"
+"github:tj-actions/auto-doc" = "3.6.0"
+
+[tasks.gen]
+description = "Regenerate the per-action / per-workflow Inputs/Outputs tables"
+run = """
+set -e
+for d in setup hk-check tool-bumps mise-latest-versions trim-releases; do
+  auto-doc --filename "$d/action.yml" --output "$d/README.md" \\
+    --inputColumns Input --inputColumns Required --inputColumns Default --inputColumns Description \\
+    --outputColumns Output --outputColumns Description --colMaxWords 100
+done
+for w in hk release secret-scan; do
+  auto-doc --reusable --filename ".github/workflows/$w.yml" --output "docs/workflows/$w.md" \\
+    --reusableInputColumns Input --reusableInputColumns Required --reusableInputColumns Default --reusableInputColumns Description \\
+    --reusableOutputColumns Output --reusableOutputColumns Description \\
+    --reusableSecretColumns Secret --reusableSecretColumns Required --reusableSecretColumns Description \\
+    --colMaxWords 100
+done
+rumdl check --fix setup/README.md hk-check/README.md tool-bumps/README.md \\
+  mise-latest-versions/README.md trim-releases/README.md docs/workflows/*.md
+"""
+
+[tasks.gen-check]
+description = "Verify the generated action/workflow docs are in sync"
+run = """
+set -e
+files="setup/README.md hk-check/README.md tool-bumps/README.md mise-latest-versions/README.md trim-releases/README.md docs/workflows/hk.md docs/workflows/release.md docs/workflows/secret-scan.md"
+before=$(shasum -a 256 $files | shasum -a 256)
+mise run gen
+after=$(shasum -a 256 $files | shasum -a 256)
+[ "$before" = "$after" ] || { echo 'generated docs are out of date — run: mise run gen'; exit 1; }
+"""
 
 [tasks.test]
 description = "Run the action helper test suites"

@@ -14,6 +14,17 @@ local linters = new Mapping<String, Step> {
     ["ty"] {
         depends = List("uv-sync")
     }
+    ["readme-gen"] = {
+        glob = List(
+            "*/action.yml",
+            ".github/workflows/*.yml",
+            "*/README.md",
+            "docs/workflows/*.md",
+            "mise.toml"
+        )
+        check = "mise run gen-check"
+        fix = "mise run gen"
+    }
     ["tool-bumps-tests"] = {
         dir = "tool-bumps"
         check = "uv run --no-project --python 3.12 --with coverage python -m coverage run -m unittest discover -p 'test_*.py' && uv run --no-project --python 3.12 --with coverage python -m coverage report"

@@ -4,7 +4,7 @@ description: >
   ref. Requires the repo checked out with full history (fetch-depth: 0).
 inputs:
   base-ref:
-    description: >
+    description: >-
       Base git ref to diff against. When empty, it is derived from the event:
       the PR base sha, the push "before" sha, or HEAD~1.
     required: false
