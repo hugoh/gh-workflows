@@ -5,8 +5,6 @@
 the gitleaks step `hk check` already runs by verifying findings against the
 live provider and sweeping history that predates gitleaks adoption.
 
-No inputs, no outputs.
-
 ## Usage
 
 ```yaml
@@ -23,3 +21,15 @@ jobs:
   secret-scan:
     uses: hugoh/gh-workflows/.github/workflows/secret-scan.yml@<pinned-sha>
 ```
+
+## Inputs
+
+<!-- AUTO-DOC-INPUT:START - Do not remove or modify this section -->
+No inputs.
+<!-- AUTO-DOC-INPUT:END -->
+
+## Outputs
+
+<!-- AUTO-DOC-OUTPUT:START - Do not remove or modify this section -->
+No outputs.
+<!-- AUTO-DOC-OUTPUT:END -->

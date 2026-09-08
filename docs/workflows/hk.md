@@ -35,3 +35,9 @@ jobs:
 |       pre-hk        |  false   |         |    Shell command to run after mise setup, before `hk check` (e.g. a build)     |
 
 <!-- AUTO-DOC-INPUT:END -->
+
+## Outputs
+
+<!-- AUTO-DOC-OUTPUT:START - Do not remove or modify this section -->
+No outputs.
+<!-- AUTO-DOC-OUTPUT:END -->

@@ -41,6 +41,7 @@ Action from a repository root):
 | [`.github/workflows/hk.yml`](docs/workflows/hk.md) | `workflow_call` wrapper around `setup` + `hk-check` |
 | [`.github/workflows/release.yml`](docs/workflows/release.md) | `workflow_call` tag + GitHub Release via `hugoh/cog-bump` |
 | [`.github/workflows/secret-scan.yml`](docs/workflows/secret-scan.md) | `workflow_call` TruffleHog OSS verified-secret scan |
+| [`.github/workflows/semantic-pr.yml`](docs/workflows/semantic-pr.md) | `workflow_call` Conventional-Commit PR-title lint via `amannn/action-semantic-pull-request` |
 
 ## Usage
 
