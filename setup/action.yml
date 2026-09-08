@@ -6,7 +6,7 @@ inputs:
     required: false
     default: "1"
   extra-cache-key-cmd:
-    description: >
+    description: >-
       Shell command whose stdout determines an extra cache key. Leave
       empty to skip.
     required: false

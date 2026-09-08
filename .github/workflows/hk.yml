@@ -20,8 +20,8 @@ on: # yamllint disable-line rule:truthy
         type: string
         default: ""
       extra-cache-key-cmd:
-        description: >
-          Shell command whose stdout determines an extra cache key Leave
+        description: >-
+          Shell command whose stdout determines an extra cache key. Leave
           empty to skip.
         type: string
         default: ""
