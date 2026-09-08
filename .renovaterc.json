@@ -3,5 +3,29 @@
   "extends": [
     "github>hugoh/renovate-config",
     "github>hugoh/renovate-config//presets/action-repo"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Bump the mise CLI version pinned via jdx/mise-action's `version` input",
+      "managerFilePatterns": [
+        "/(^|/)\\.github/workflows/.*\\.ya?ml$/",
+        "/(^|/)action\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "jdx/mise-action@[^\\n]+\\n\\s+with:\\n\\s+version:\\s*(?<currentValue>[\\d.]+)"
+      ],
+      "datasourceTemplate": "github-releases",
+      "packageNameTemplate": "jdx/mise",
+      "versioningTemplate": "semver"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "The mise version pin has the same downstream impact as the mise-action pin itself: propagate as a fix commit.",
+      "matchManagers": ["custom.regex"],
+      "matchPackageNames": ["jdx/mise"],
+      "semanticCommitType": "fix"
+    }
   ]
 }
