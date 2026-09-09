@@ -2,7 +2,11 @@
 
 Checks out the repo and sets up mise. The first step of most CI jobs in the
 fleet — pair it with [`hk-check`](../hk-check/) and put any extra steps
-(installing an apt package, running a build) in between.
+(running a build) in between.
+
+`apt-packages` are installed (and cached) first, before checkout — for
+packages a job needs on every run (e.g. headers mise needs to build a tool
+from source), not one-off steps.
 
 `extra-cache-key-cmd` / `extra-cache-paths` cache a subset of mise's installed
 tools keyed on the stdout of a caller-supplied command instead of the whole
@@ -35,6 +39,7 @@ jobs:
 
 |        INPUT        | REQUIRED | DEFAULT |                                  DESCRIPTION                                   |
 |---------------------|----------|---------|--------------------------------------------------------------------------------|
+|    apt-packages     |  false   |         |             Space-separated apt packages the job needs (cached)               |
 | extra-cache-key-cmd |  false   |         | Shell command whose stdout determines an extra cache key. Leave empty to skip. |
 |  extra-cache-paths  |  false   |         |                Newline-separated paths to cache under that key.                |
 |     fetch-depth     |  false   |  `"1"`  |                 Number of commits to fetch (0 = full history)                  |

@@ -5,6 +5,10 @@ inputs:
     description: Number of commits to fetch (0 = full history)
     required: false
     default: "1"
+  apt-packages:
+    description: Space-separated apt packages the job needs (cached)
+    required: false
+    default: ""
   extra-cache-key-cmd:
     description: >-
       Shell command whose stdout determines an extra cache key. Leave
@@ -18,6 +22,12 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Install apt packages
+      if: inputs.apt-packages != ''
+      uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
+      with:
+        packages: ${{ inputs.apt-packages }}
+        version: ${{ inputs.apt-packages }}
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
