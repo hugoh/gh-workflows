@@ -39,7 +39,7 @@ jobs:
 
 |        INPUT        | REQUIRED | DEFAULT |                                  DESCRIPTION                                   |
 |---------------------|----------|---------|--------------------------------------------------------------------------------|
-|    apt-packages     |  false   |         |             Space-separated apt packages the job needs (cached)               |
+|    apt-packages     |  false   |         |              Space-separated apt packages the job needs (cached)               |
 | extra-cache-key-cmd |  false   |         | Shell command whose stdout determines an extra cache key. Leave empty to skip. |
 |  extra-cache-paths  |  false   |         |                Newline-separated paths to cache under that key.                |
 |     fetch-depth     |  false   |  `"1"`  |                 Number of commits to fetch (0 = full history)                  |
