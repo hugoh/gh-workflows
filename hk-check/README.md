@@ -14,3 +14,15 @@ steps:
   - run: npm ci && npm run build   # optional extra steps
   - uses: hugoh/gh-workflows/hk-check@<pinned-sha>
 ```
+
+## Inputs
+
+<!-- AUTO-DOC-INPUT:START - Do not remove or modify this section -->
+No inputs.
+<!-- AUTO-DOC-INPUT:END -->
+
+## Outputs
+
+<!-- AUTO-DOC-OUTPUT:START - Do not remove or modify this section -->
+No outputs.
+<!-- AUTO-DOC-OUTPUT:END -->

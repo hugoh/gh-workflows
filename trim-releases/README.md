@@ -45,3 +45,9 @@ jobs:
 | prerelease-cutoff-days |  false   |         `"14"`          | Delete kept prereleases once older than this many days |
 
 <!-- AUTO-DOC-INPUT:END -->
+
+## Outputs
+
+<!-- AUTO-DOC-OUTPUT:START - Do not remove or modify this section -->
+No outputs.
+<!-- AUTO-DOC-OUTPUT:END -->
