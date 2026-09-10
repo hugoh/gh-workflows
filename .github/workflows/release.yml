@@ -10,6 +10,12 @@ on: # yamllint disable-line rule:truthy
         description: Existing tag to create a GitHub Release for; skips the bump
         type: string
         required: false
+      bump:
+        description: >-
+          Force the bump level instead of deriving it from the commits since the
+          last tag: auto (default), patch, minor, major. Ignored when tag is set.
+        type: string
+        default: auto
       notes:
         description: "Release notes body (default: GitHub auto-generated notes)"
         type: string
@@ -41,6 +47,16 @@ on: # yamllint disable-line rule:truthy
         description: Existing tag to create a GitHub Release for; skips the bump
         required: false
         type: string
+      bump:
+        description: Force the bump level (auto = derive from commits). Ignored when tag is set.
+        required: false
+        type: choice
+        default: auto
+        options:
+          - auto
+          - patch
+          - minor
+          - major
       notes:
         description: "Release notes body (default: GitHub auto-generated notes)"
         required: false
@@ -78,6 +94,8 @@ jobs:
       - id: bump
         if: inputs.tag == ''
         uses: hugoh/cog-bump@40cbe76b9059638912c9b3038f8c46844cf95cbc # v0.2.1
+        with:
+          bump: ${{ inputs.bump || 'auto' }}
 
       - if: inputs.package-command != ''
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
