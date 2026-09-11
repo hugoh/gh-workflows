@@ -60,12 +60,20 @@ def test_retention_knobs_are_honoured():
     assert sorted(deleted) == ["v-full-03", "v-full-04", "v-full-05"]
 
 
-def test_main_dry_run_reports_without_deleting(monkeypatch, capsys):
-    releases = [release(f"v-full-{i:02d}", False, i) for i in range(1, 13)]
-    monkeypatch.setattr("trim_releases.fetch_releases", lambda: releases)
+@pytest.fixture
+def mock_releases(monkeypatch):
+    def _mock(releases):
+        monkeypatch.setattr("trim_releases.fetch_releases", lambda: releases)
+        deleted = []
+        monkeypatch.setattr("trim_releases.delete_release", deleted.append)
+        return deleted
 
-    deleted = []
-    monkeypatch.setattr("trim_releases.delete_release", deleted.append)
+    return _mock
+
+
+def test_main_dry_run_reports_without_deleting(mock_releases, capsys):
+    releases = [release(f"v-full-{i:02d}", False, i) for i in range(1, 13)]
+    deleted = mock_releases(releases)
 
     assert main(["--dry-run"]) == 0
     assert deleted == []
@@ -74,12 +82,9 @@ def test_main_dry_run_reports_without_deleting(monkeypatch, capsys):
     assert "Would delete release v-full-12" in out
 
 
-def test_main_deletes_selected_tags(monkeypatch, capsys):
+def test_main_deletes_selected_tags(mock_releases, capsys):
     releases = [release(f"v-full-{i:02d}", False, i) for i in range(1, 13)]
-    monkeypatch.setattr("trim_releases.fetch_releases", lambda: releases)
-
-    deleted = []
-    monkeypatch.setattr("trim_releases.delete_release", deleted.append)
+    deleted = mock_releases(releases)
 
     assert main([]) == 0
     assert sorted(deleted) == ["v-full-11", "v-full-12"]
