@@ -17,7 +17,7 @@ on: # yamllint disable-line rule:truthy
         type: string
         default: auto
       notes:
-        description: "Release notes body (default: GitHub auto-generated notes)"
+        description: "Release notes body (default: cog changelog notes, falling back to GitHub auto-generated notes)"
         type: string
         required: false
       major-tag:
@@ -58,7 +58,7 @@ on: # yamllint disable-line rule:truthy
           - minor
           - major
       notes:
-        description: "Release notes body (default: GitHub auto-generated notes)"
+        description: "Release notes body (default: cog changelog notes, falling back to GitHub auto-generated notes)"
         required: false
         type: string
       package-command:
@@ -111,6 +111,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag != '' && inputs.tag || steps.bump.outputs.tag }}
           INPUT_NOTES: ${{ inputs.notes }}
+          COG_NOTES: ${{ steps.bump.outputs.notes }}
           MAJOR_TAG: ${{ inputs.major-tag }}
         run: |
           set -euo pipefail
@@ -122,6 +123,9 @@ jobs:
 
           if [ -n "$INPUT_NOTES" ]; then
             gh release create "$TAG" --verify-tag --title "$TAG" --notes "$INPUT_NOTES"
+          elif [ -n "$COG_NOTES" ]; then
+            printf '%s' "$COG_NOTES" > /tmp/release-notes.md
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file /tmp/release-notes.md
           else
             gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
           fi
