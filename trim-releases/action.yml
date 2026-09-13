@@ -32,6 +32,7 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
+        GH_REPO: ${{ github.repository }}
         DRY_RUN: ${{ inputs.dry-run }}
         KEEP_FULL: ${{ inputs.keep-full }}
         KEEP_PRERELEASES: ${{ inputs.keep-prereleases }}
