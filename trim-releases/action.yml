@@ -25,6 +25,10 @@ inputs:
     description: Token with contents:write for the target repo
     required: false
     default: ${{ github.token }}
+  repo:
+    description: Repo to trim releases in, as owner/name
+    required: false
+    default: ${{ github.repository }}
 runs:
   using: composite
   steps:
@@ -32,6 +36,7 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
+        GH_REPO: ${{ inputs.repo }}
         DRY_RUN: ${{ inputs.dry-run }}
         KEEP_FULL: ${{ inputs.keep-full }}
         KEEP_PRERELEASES: ${{ inputs.keep-prereleases }}
