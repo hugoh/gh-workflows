@@ -36,13 +36,14 @@ jobs:
 
 <!-- AUTO-DOC-INPUT:START - Do not remove or modify this section -->
 
-|         INPUT          | REQUIRED |         DEFAULT         |                      DESCRIPTION                       |
-|------------------------|----------|-------------------------|--------------------------------------------------------|
-|        dry-run         |  false   |        `"false"`        |            Only print what would be deleted            |
-|      github-token      |  false   | `"${{ github.token }}"` |     Token with contents:write for the target repo      |
-|       keep-full        |  false   |         `"10"`          |         Number of newest full releases to keep         |
-|    keep-prereleases    |  false   |          `"3"`          |          Number of newest prereleases to keep          |
-| prerelease-cutoff-days |  false   |         `"14"`          | Delete kept prereleases once older than this many days |
+|         INPUT          | REQUIRED |            DEFAULT           |                      DESCRIPTION                       |
+|------------------------|----------|-------------------------------|--------------------------------------------------------|
+|        dry-run         |  false   |           `"false"`          |            Only print what would be deleted            |
+|      github-token      |  false   |    `"${{ github.token }}"`   |     Token with contents:write for the target repo      |
+|       keep-full        |  false   |            `"10"`            |         Number of newest full releases to keep         |
+|    keep-prereleases    |  false   |            `"3"`             |          Number of newest prereleases to keep          |
+| prerelease-cutoff-days |  false   |            `"14"`            | Delete kept prereleases once older than this many days |
+|          repo          |  false   | `"${{ github.repository }}"` |          Repo to trim releases in, as owner/name       |
 
 <!-- AUTO-DOC-INPUT:END -->
 
