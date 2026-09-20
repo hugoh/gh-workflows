@@ -24,7 +24,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           requireScope: false
-          subjectPattern: ^(?![A-Z]).+$
+          subjectPattern: ^(?![A-Z][a-z]).+$
           subjectPatternError: >-
-            "{subject}" must start with a lowercase letter — the PR title
-            becomes the squash-merge commit subject.
+            "{subject}" must not start with a capitalized word (acronyms like
+            TUI are fine) — the PR title becomes the squash-merge commit
+            subject.
