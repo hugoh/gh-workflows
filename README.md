@@ -21,6 +21,7 @@ from `action.yml` by `mise run gen`).
 | [`tool-bumps`](tool-bumps/) | JSON map of which `mise.toml` tools changed since a base ref, for gating jobs |
 | [`mise-latest-versions`](mise-latest-versions/) | JSON array of the newest N version series of a mise tool, for a test matrix |
 | [`trim-releases`](trim-releases/) | delete old GitHub releases on a retention policy |
+| [`automerge-keep-fresh`](automerge-keep-fresh/) | update branches for stale auto-merge PRs |
 
 Two more actions live in their own repos (GitHub Marketplace only publishes an
 Action from a repository root):
@@ -42,7 +43,6 @@ Action from a repository root):
 | [`.github/workflows/release.yml`](docs/workflows/release.md) | `workflow_call` tag + GitHub Release via `hugoh/cog-bump` |
 | [`.github/workflows/secret-scan.yml`](docs/workflows/secret-scan.md) | `workflow_call` TruffleHog OSS verified-secret scan |
 | [`.github/workflows/semantic-pr.yml`](docs/workflows/semantic-pr.md) | `workflow_call` Conventional-Commit PR-title lint via `amannn/action-semantic-pull-request` |
-| [`.github/workflows/automerge-keep-fresh.yml`](docs/workflows/automerge-keep-fresh.md) | `workflow_call` updates auto-merge PRs stuck `BEHIND` main |
 
 ## Usage
 
