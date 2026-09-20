@@ -1,7 +1,13 @@
 name: Keep auto-merge PRs fresh
 
 on: # yamllint disable-line rule:truthy
-  workflow_call: {}
+  workflow_call:
+    inputs:
+      pull-request-number:
+        description: PR number to inspect instead of reconciling all open PRs
+        required: false
+        type: string
+        default: ""
 
 permissions: {}
 
@@ -13,14 +19,39 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - name: Update branch for stale auto-merge PRs
+      - name: Update stale auto-merge PRs
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pull-request-number }}
+        shell: bash
         run: |
-          gh pr list --state open --json number,autoMergeRequest,mergeStateStatus \
-            --jq '.[] | select(.autoMergeRequest != null and .mergeStateStatus == "BEHIND") | .number' |
+          set -euo pipefail
+
+          readonly max_attempts=6
+          readonly retry_seconds=10
+
+          if [[ -n "${PR_NUMBER:-}" ]]; then
+            prs="$(
+              gh pr view "$PR_NUMBER" --repo "$GH_REPO" \
+                --json number,autoMergeRequest,mergeStateStatus \
+                --jq 'select(.autoMergeRequest != null and .mergeStateStatus == "BEHIND") | .number'
+            )"
+          else
+            prs=""
+            for attempt in $(seq "$max_attempts"); do
+              prs="$(
+                gh pr list --repo "$GH_REPO" --state open --limit 100 \
+                  --json number,autoMergeRequest,mergeStateStatus \
+                  --jq '.[] | select(.autoMergeRequest != null and .mergeStateStatus == "BEHIND") | .number'
+              )"
+              [[ -n "$prs" ]] && break
+              [[ "$attempt" -lt "$max_attempts" ]] && sleep "$retry_seconds"
+            done
+          fi
+
           while read -r pr; do
+            [[ -z "$pr" ]] && continue
             echo "Updating PR #$pr (behind main, auto-merge enabled)"
             gh api "repos/$GH_REPO/pulls/$pr/update-branch" -X PUT
-          done
+          done <<< "$prs"
