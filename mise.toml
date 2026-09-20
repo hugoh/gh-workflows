@@ -22,7 +22,7 @@ ty = "0.0.78"
 description = "Regenerate the per-action / per-workflow Inputs/Outputs tables"
 run = """
 set -e
-for d in setup hk-check tool-bumps mise-latest-versions trim-releases; do
+for d in setup hk-check tool-bumps mise-latest-versions trim-releases automerge-keep-fresh; do
   auto-doc --filename "$d/action.yml" --output "$d/README.md" \\
     --inputColumns Input --inputColumns Required --inputColumns Default --inputColumns Description \\
     --outputColumns Output --outputColumns Description --colMaxWords 100
@@ -42,7 +42,7 @@ rumdl check --fix setup/README.md hk-check/README.md tool-bumps/README.md \\
 description = "Verify the generated action/workflow docs are in sync"
 run = """
 set -e
-files="setup/README.md hk-check/README.md tool-bumps/README.md mise-latest-versions/README.md trim-releases/README.md docs/workflows/hk.md docs/workflows/release.md docs/workflows/secret-scan.md docs/workflows/semantic-pr.md docs/workflows/automerge-keep-fresh.md"
+files="setup/README.md hk-check/README.md tool-bumps/README.md mise-latest-versions/README.md trim-releases/README.md automerge-keep-fresh/README.md docs/workflows/hk.md docs/workflows/release.md docs/workflows/secret-scan.md docs/workflows/semantic-pr.md docs/workflows/automerge-keep-fresh.md"
 before=$(shasum -a 256 $files | shasum -a 256)
 mise run gen
 after=$(shasum -a 256 $files | shasum -a 256)

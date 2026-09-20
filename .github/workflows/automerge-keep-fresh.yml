@@ -20,38 +20,9 @@ jobs:
       pull-requests: write
     steps:
       - name: Update stale auto-merge PRs
+        uses: hugoh/gh-workflows/automerge-keep-fresh@98cb4d63a508c975a9766fb83426a5d87d6c5e95 # v1.40.0
+        with:
+          pull-request-number: ${{ inputs.pull-request-number }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ inputs.pull-request-number }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          readonly max_attempts=6
-          readonly retry_seconds=10
-
-          if [[ -n "${PR_NUMBER:-}" ]]; then
-            prs="$(
-              gh pr view "$PR_NUMBER" --repo "$GH_REPO" \
-                --json number,autoMergeRequest,mergeStateStatus \
-                --jq 'select(.autoMergeRequest != null and .mergeStateStatus == "BEHIND") | .number'
-            )"
-          else
-            prs=""
-            for attempt in $(seq "$max_attempts"); do
-              prs="$(
-                gh pr list --repo "$GH_REPO" --state open --limit 100 \
-                  --json number,autoMergeRequest,mergeStateStatus \
-                  --jq '.[] | select(.autoMergeRequest != null and .mergeStateStatus == "BEHIND") | .number'
-              )"
-              [[ -n "$prs" ]] && break
-              [[ "$attempt" -lt "$max_attempts" ]] && sleep "$retry_seconds"
-            done
-          fi
-
-          while read -r pr; do
-            [[ -z "$pr" ]] && continue
-            echo "Updating PR #$pr (behind main, auto-merge enabled)"
-            gh api "repos/$GH_REPO/pulls/$pr/update-branch" -X PUT
-          done <<< "$prs"

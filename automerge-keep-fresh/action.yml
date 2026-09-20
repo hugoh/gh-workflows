@@ -1,0 +1,15 @@
+name: Keep auto-merge PRs fresh
+description: Updates branches for open auto-merge PRs that are behind the default branch
+inputs:
+  pull-request-number:
+    description: PR number to inspect instead of reconciling all open PRs
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Update stale auto-merge PRs
+      shell: bash
+      env:
+        PR_NUMBER: ${{ inputs.pull-request-number }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/automerge-keep-fresh.sh"
