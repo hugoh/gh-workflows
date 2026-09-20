@@ -16,7 +16,7 @@ if [[ -n "${PR_NUMBER:-}" ]]; then
   )"
 else
   prs=""
-  for attempt in "$(seq "$max_attempts")"; do
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
     prs="$(
       gh pr list --repo "$GH_REPO" --state open --limit 100 \
         --json number,autoMergeRequest,mergeStateStatus \
