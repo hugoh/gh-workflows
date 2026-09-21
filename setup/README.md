@@ -15,8 +15,8 @@ postinstall hooks), hashing the whole config busts the cache on every unrelated
 version bump, so the caller instead extracts just the relevant bits of its
 `mise.toml` (e.g. one tool's pinned version plus its `[hooks]` block) and names
 the paths to cache under that key. No-ops when `extra-cache-key-cmd` is empty.
-`.github/workflows/hk.yml` exposes the same two inputs for its own inlined
-checkout+mise step.
+`.github/workflows/hk.yml` exposes the same two inputs and passes them through
+to its own `$/setup` call.
 
 ## Usage
 
