@@ -45,50 +45,17 @@ jobs:
       statuses: write
     runs-on: ubuntu-latest
     steps:
-      - name: Compute apt-packages cache key
-        if: inputs.apt-packages != ''
-        id: apt-cache-key
-        shell: bash
-        env:
-          APT_PACKAGES: ${{ inputs.apt-packages }}
-        run: echo "version=${APT_PACKAGES// /-}" >> "$GITHUB_OUTPUT"
-      - name: Install apt packages
-        if: inputs.apt-packages != ''
-        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
+      - uses: $/setup
         with:
-          packages: ${{ inputs.apt-packages }}
-          version: ${{ steps.apt-cache-key.outputs.version }}
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
           fetch-depth: ${{ inputs.fetch-depth || '1' }}
-      - name: Compute extra cache key
-        if: inputs.extra-cache-key-cmd != ''
-        id: extra-cache-key
-        shell: bash
-        env:
-          EXTRA_CACHE_KEY_CMD: ${{ inputs.extra-cache-key-cmd }}
-        run: |
-          hash=$(bash -c "$EXTRA_CACHE_KEY_CMD" | sha256sum | cut -d' ' -f1)
-          echo "hash=$hash" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: inputs.extra-cache-key-cmd != ''
-        with:
-          path: ${{ inputs.extra-cache-paths }}
-          key: ${{ runner.os }}-extra-${{ steps.extra-cache-key.outputs.hash }}
-          restore-keys: ${{ runner.os }}-extra-
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
-        with:
-          version: 2026.9.7
-        env:
-          MISE_HTTP_TIMEOUT: 120s
-          MISE_FETCH_REMOTE_VERSIONS_TIMEOUT: 60s
+          apt-packages: ${{ inputs.apt-packages }}
+          extra-cache-key-cmd: ${{ inputs.extra-cache-key-cmd }}
+          extra-cache-paths: ${{ inputs.extra-cache-paths }}
       - name: Pre-check
         if: inputs.pre-hk != ''
         env:
           PRE_HK: ${{ inputs.pre-hk }}
         run: bash -c "$PRE_HK"
-      - name: hk checks
+      - uses: $/hk-check
         env:
           PINACT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: hk check --no-progress --profile ci --all --no-fail-fast
