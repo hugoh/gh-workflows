@@ -37,12 +37,13 @@ jobs:
 
 <!-- AUTO-DOC-INPUT:START - Do not remove or modify this section -->
 
-|        INPUT        | REQUIRED | DEFAULT |                                  DESCRIPTION                                   |
-|---------------------|----------|---------|--------------------------------------------------------------------------------|
-|    apt-packages     |  false   |         |              Space-separated apt packages the job needs (cached)               |
-| extra-cache-key-cmd |  false   |         | Shell command whose stdout determines an extra cache key. Leave empty to skip. |
-|  extra-cache-paths  |  false   |         |                Newline-separated paths to cache under that key.                |
-|     fetch-depth     |  false   |  `"1"`  |                 Number of commits to fetch (0 = full history)                  |
+|        INPUT        | REQUIRED | DEFAULT  |                                                        DESCRIPTION                                                        |
+|---------------------|----------|----------|----------------------------------------------------------------------------------------------------------------------------|
+|    apt-packages     |  false   |          |                                    Space-separated apt packages the job needs (cached)                                     |
+| extra-cache-key-cmd |  false   |          |                       Shell command whose stdout determines an extra cache key. Leave empty to skip.                       |
+|  extra-cache-paths  |  false   |          |                                      Newline-separated paths to cache under that key.                                      |
+|     fetch-depth     |  false   |  `"1"`   |                                       Number of commits to fetch (0 = full history)                                        |
+|  mise-cache-scope   |  false   | `"repo"` | Mise tool cache scope: "repo" (default) shares one cache across the repo, "job" isolates it to this workflow+job. |
 
 <!-- AUTO-DOC-INPUT:END -->
 
