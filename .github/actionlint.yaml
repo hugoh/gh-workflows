@@ -3,5 +3,7 @@
 # https://github.blog/changelog/2026-07-30-reference-same-repository-actions-with-self-repository-syntax/).
 # Remove this once https://github.com/rhysd/actionlint/pull/732 ships in a
 # release and this repo's mise.toml is bumped past it.
-ignore:
-  - 'specifying action "\$/.+" in invalid format because ref is missing'
+paths:
+  .github/workflows/**/*.{yml,yaml}:
+    ignore:
+      - 'specifying action "\$/.+" in invalid format because ref is missing'
