@@ -70,8 +70,7 @@ on: # yamllint disable-line rule:truthy
         required: false
         type: string
 
-permissions:
-  contents: write
+permissions: {}
 
 concurrency:
   group: release
@@ -101,6 +100,7 @@ jobs:
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
           version: 2026.10.13
+          cache: false
         env:
           MISE_HTTP_TIMEOUT: 120s
           MISE_FETCH_REMOTE_VERSIONS_TIMEOUT: 60s

@@ -1,6 +1,6 @@
-amends "package://github.com/jdx/hk/releases/download/v2.5.0/hk@2.5.0#/Config.pkl"
-import "package://github.com/jdx/hk/releases/download/v2.5.0/hk@2.5.0#/Builtins.pkl"
-import "package://github.com/hugoh/hk-config/releases/download/v2.1.3/hk-config@2.1.3#/base.pkl" as Base
+amends "package://github.com/jdx/hk/releases/download/v2.9.0/hk@2.9.0#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v2.9.0/hk@2.9.0#/Builtins.pkl"
+import "package://github.com/hugoh/hk-config/releases/download/v3.0.0/hk-config@3.0.0#/base.pkl" as Base
 
 min_hk_version = Base.min_hk_version
 
@@ -8,13 +8,13 @@ local linters = new Mapping<String, Step> {
     ...Base.base
     ...Base.shell
     ...Base.python
-    ["uv-sync"] = {
+    ["uv-sync"] {
         check = "uv sync"
     }
     ["ty"] {
         depends = List("uv-sync")
     }
-    ["readme-gen"] = {
+    ["readme-gen"] {
         glob = List(
             "*/action.yml",
             ".github/workflows/*.yml",
@@ -25,17 +25,17 @@ local linters = new Mapping<String, Step> {
         check = "mise run gen-check"
         fix = "mise run gen"
     }
-    ["tool-bumps-tests"] = {
+    ["tool-bumps-tests"] {
         dir = "tool-bumps"
         check = "uv run --no-project --python 3.12 --with coverage python -m coverage run -m unittest discover -p 'test_*.py' && uv run --no-project --python 3.12 --with coverage python -m coverage report"
         profiles = List("ci")
     }
-    ["mise-latest-versions-tests"] = {
+    ["mise-latest-versions-tests"] {
         dir = "mise-latest-versions"
         check = "uv run --no-project --python 3.12 --with pytest --with pytest-cov pytest -q --cov --cov-report=term-missing"
         profiles = List("ci")
     }
-    ["trim-releases-tests"] = {
+    ["trim-releases-tests"] {
         dir = "trim-releases"
         check = "uv run --no-project --python 3.12 --with pytest --with pytest-cov pytest -q --cov --cov-report=term-missing --cov-fail-under=100"
         profiles = List("ci")
