@@ -54,9 +54,9 @@ runs:
         path: ${{ inputs.extra-cache-paths }}
         key: ${{ runner.os }}-extra-${{ steps.extra-cache-key.outputs.hash }}
         restore-keys: ${{ runner.os }}-extra-
-    - uses: jdx/mise-action@6612f0ef07ed2a736cd1e00a94a065522dd41195 # v5.2.5
+    - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
       with:
-        version: 2026.10.25
+        version: 2026.11.3
       env:
         # Widen mise's network timeouts so a slow mirror or cold cache
         # retries instead of aborting the job.
