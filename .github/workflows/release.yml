@@ -99,7 +99,7 @@ jobs:
       - if: inputs.package-command != ''
         uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
-          version: 2026.11.3
+          version: 2026.11.4
           cache: false
         env:
           MISE_HTTP_TIMEOUT: 120s
