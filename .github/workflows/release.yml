@@ -92,7 +92,7 @@ jobs:
 
       - id: bump
         if: inputs.tag == ''
-        uses: hugoh/cog-bump@1aefd35cb788fd9f29d30acafb3c319285dd1c6a # v0.3.5
+        uses: hugoh/cog-bump@74d2f188b076a799c044746e79a9f59c592cacd3 # v0.3.6
         with:
           bump: ${{ inputs.bump || 'auto' }}
 
