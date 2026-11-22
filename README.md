@@ -44,6 +44,11 @@ Action from a repository root):
 | [`.github/workflows/secret-scan.yml`](docs/workflows/secret-scan.md) | `workflow_call` TruffleHog OSS verified-secret scan |
 | [`.github/workflows/semantic-pr.yml`](docs/workflows/semantic-pr.md) | `workflow_call` Conventional-Commit PR-title lint via `amannn/action-semantic-pull-request` |
 
+This repo runs its own workflows through [`ci.yml`](.github/workflows/ci.yml):
+`hk` and `secret-scan` feed a `ci-gate` job that `release` waits on. The
+reusable workflows above have no `push`/`pull_request` triggers of their own;
+`secret-scan.yml` keeps its weekly `schedule` and `workflow_dispatch`.
+
 ## Usage
 
 The canonical lint job — `setup`, then `hk-check`, with any extra steps
