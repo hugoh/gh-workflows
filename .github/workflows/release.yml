@@ -1,9 +1,6 @@
 name: release
 
 on: # yamllint disable-line rule:truthy
-  push:
-    branches:
-      - main
   workflow_call:
     inputs:
       tag:
@@ -41,34 +38,6 @@ on: # yamllint disable-line rule:truthy
       tag:
         description: The tag that was released, or empty when there was nothing to release
         value: ${{ jobs.release.outputs.tag }}
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing tag to create a GitHub Release for; skips the bump
-        required: false
-        type: string
-      bump:
-        description: Force the bump level (auto = derive from commits). Ignored when tag is set.
-        required: false
-        type: choice
-        default: auto
-        options:
-          - auto
-          - patch
-          - minor
-          - major
-      notes:
-        description: "Release notes body (default: cog changelog notes, falling back to GitHub auto-generated notes)"
-        required: false
-        type: string
-      package-command:
-        description: Shell command that builds release artifacts (mise tools on PATH, $TAG/$VERSION exported). Skipped when empty.
-        required: false
-        type: string
-      package-artifacts:
-        description: Glob(s) of files to attach to the Release. Required when package-command is set.
-        required: false
-        type: string
 
 permissions: {}
 
